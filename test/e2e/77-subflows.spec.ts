@@ -168,7 +168,7 @@ test.describe('Subflows feature', () => {
 
     const events = await readSSE(
       `${API_URL}/flows/${parent.id}/execute`,
-      { input: { message: 'hello world' }, _debug: true },
+      { input: { _debug: true, message: 'hello world' } },
       adminCookie,
     );
 
@@ -220,7 +220,7 @@ test.describe('Subflows feature', () => {
 
     const events = await readSSE(
       `${API_URL}/flows/${parent.id}/execute`,
-      { input: { num: 21 }, _debug: true },
+      { input: { _debug: true, num: 21 } },
       adminCookie,
     );
 
@@ -256,7 +256,7 @@ test.describe('Subflows feature', () => {
 
     const events = await readSSE(
       `${API_URL}/flows/${parent.id}/execute`,
-      { input: {}, _debug: true },
+      { input: { _debug: true } },
       adminCookie,
     );
 
@@ -315,7 +315,7 @@ test.describe('Subflows feature', () => {
 
     const events = await readSSE(
       `${API_URL}/flows/${parent.id}/execute`,
-      { input: { text: 'hello' }, _debug: true },
+      { input: { _debug: true, text: 'hello' } },
       adminCookie,
     );
 
@@ -382,7 +382,7 @@ test.describe('Subflows feature', () => {
     const adminCookie = `token=${getAuthCookie()?.split('=')[1] || ''}`;
     const events = await readSSE(
       `${API_URL}/flows/${flow.id}/execute`,
-      { input: {}, _debug: true },
+      { input: { _debug: true } },
       adminCookie,
     );
     const failedEvent = events.find(e => e.type === 'execution.failed');
@@ -435,12 +435,10 @@ test.describe('Subflows feature', () => {
 
     const adminCookie = `token=${getAuthCookie()?.split('=')[1] || ''}`;
     const { executeUntilPaused, pollExecution } = await import('./helpers/stream');
-    const { events, executionId } = await executeUntilPaused(parent.id, { text: 'x' }, adminCookie);
+    const { executionId } = await executeUntilPaused(parent.id, { text: 'x' }, adminCookie);
     expect(executionId).toBeTruthy();
 
     // The pause is caused by the child's HITL node — its prompt is surfaced as pending
-    const paused = events.find(e => e.type === 'execution.paused');
-    expect(paused).toBeDefined();
     const execRes = await request.get(`${API_URL}/executions/${executionId}`);
     expect(execRes.ok()).toBe(true);
     const exec = await execRes.json();
@@ -452,10 +450,10 @@ test.describe('Subflows feature', () => {
     expect(pending[0]?.nodeId).toBe('sub:n3');
 
     // The child flow ran as a sub-execution of the parent
-    const subStarted = events.find(e => e.type === 'subflow.started');
-    expect(subStarted).toBeDefined();
-    const subId = subStarted?.data?.subExecutionId;
-    expect(subId).toBeTruthy();
+    const subExecs = await (await request.get(`${API_URL}/executions?parent_execution_id=${executionId}`)).json().catch(() => []);
+    const subExec = Array.isArray(subExecs) ? subExecs[0] : undefined;
+    expect(subExec?.id).toBeTruthy();
+    const subId = subExec.id;
 
     // Approve → the replay must resume inside the child, complete it, and finish the parent
     const approveRes = await fetch(`${API_URL}/executions/${executionId}/approve`, {
@@ -512,7 +510,7 @@ test.describe('Subflows feature', () => {
     const adminCookie = `token=${getAuthCookie()?.split('=')[1] || ''}`;
     const events = await readSSE(
       `${API_URL}/flows/${parent.id}/execute`,
-      { input: { text: 'hello' }, _debug: true },
+      { input: { _debug: true, text: 'hello' } },
       adminCookie,
     );
 
@@ -549,39 +547,25 @@ test.describe('Subflows feature', () => {
     createdFlowIds.push(parent.id);
 
     const adminCookie = `token=${getAuthCookie()?.split('=')[1] || ''}`;
-    const events = await readSSE(
-      `${API_URL}/flows/${parent.id}/execute`,
-      { input: { text: 'zz' }, _debug: false },
-      adminCookie,
-    );
-
-    const started = events.find(e => e.type === 'execution.started');
-    expect(started).toBeDefined();
-    const parentExecutionId = started?.executionId;
+    const { executePersisted, pollExecution } = await import('./helpers/stream');
+    const { executionId: parentExecutionId } = await executePersisted(parent.id, { text: 'zz' }, adminCookie);
     expect(parentExecutionId).toBeTruthy();
 
-    const completed = events.find(e => e.type === 'execution.completed');
-    expect(completed).toBeDefined();
-    const outputStr = JSON.stringify(completed?.data?.output || {});
+    const parentExec = await pollExecution(request, parentExecutionId, 30000);
+    expect(parentExec.status).toBe('completed');
+    const outputStr = JSON.stringify(parentExec.output || {});
     expect(outputStr).toContain('persisted:zz');
 
     // The child flow was persisted as its own execution record
-    const subStarted = events.find(e => e.type === 'subflow.started');
-    expect(subStarted).toBeDefined();
-    const subExecutionId = subStarted?.data?.subExecutionId;
-    expect(subExecutionId).toBeTruthy();
-    expect(subExecutionId).not.toBe(parentExecutionId);
-
-    const subRes = await request.get(`${API_URL}/executions/${subExecutionId}`);
+    const subRes = await request.get(`${API_URL}/executions?parent_execution_id=${parentExecutionId}`);
     expect(subRes.ok()).toBe(true);
-    const sub = await subRes.json();
+    const subExecs = await subRes.json();
+    const subList = Array.isArray(subExecs) ? subExecs : (subExecs.data || []);
+    const sub = subList.find((e: any) => e.status === 'completed') || subList[0];
+    expect(sub?.id).toBeTruthy();
+    expect(sub.id).not.toBe(parentExecutionId);
     expect(sub.flow_id).toBe(child.id);
     expect(sub.status).toBe('completed');
     expect(JSON.stringify(sub.output)).toContain('persisted:zz');
-
-    // Parent record is completed as well
-    const parentRes2 = await request.get(`${API_URL}/executions/${parentExecutionId}`);
-    expect(parentRes2.ok()).toBe(true);
-    expect((await parentRes2.json()).status).toBe('completed');
   });
 });

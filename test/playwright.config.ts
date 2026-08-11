@@ -1,5 +1,14 @@
 import { defineConfig } from '@playwright/test';
 
+// Load test/.env.e2e (gitignored, local-only) — e.g. the real-LLM suite's
+// API key. Existing process env vars take precedence (loadEnvFile does not
+// override already-set variables).
+try {
+  process.loadEnvFile(new URL('./.env.e2e', import.meta.url));
+} catch {
+  // No env file — optional.
+}
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,

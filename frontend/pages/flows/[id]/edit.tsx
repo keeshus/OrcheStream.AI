@@ -8,6 +8,7 @@ import { NodeCatalog } from '@/components/flow/NodeCatalog';
 import { NodeConfigModal } from '@/components/flow/NodeConfigModal';
 import { DebugOverlay } from '@/components/flow/DebugOverlay';
 import { Icon } from '@/components/ui/Icon';
+import { BrandLogo } from '@/components/BrandLogo';
 import { TextField } from '@/components/ui/TextField';
 import { useConfirm } from '@/lib/useConfirm';
 import * as Separator from '@radix-ui/react-separator';
@@ -516,7 +517,10 @@ export default function FlowEditPage() {
       {/* Floating top bar — title & description */}
       <div className="pointer-events-none fixed inset-x-0 top-3 flex justify-center z-40">
         <div className="pointer-events-auto flex items-center gap-2 bg-surface/90 backdrop-blur border rounded-lg shadow-sm px-3 py-1.5">
-          <Link href="/" className="flex items-center gap-1 leading-none text-on-surface-variant hover:text-on-surface-variant shrink-0"><Icon name="arrow_back" className="text-sm" /> <span>Back</span></Link>
+          <Link href="/" className="flex items-center gap-1.5 shrink-0 leading-none text-on-surface-variant hover:text-on-surface-variant" title="Home">
+            <BrandLogo size="sm" />
+            <span>Home</span>
+          </Link>
           <TextField label="Flow name" value={flow.name} onChange={(v) => setFlow((prev: any) => ({ ...prev, name: v }))} className="min-w-[80px] max-w-[160px]" />
           <TextField label="Description" value={flow.description || ''} onChange={(v) => setFlow((prev: any) => ({ ...prev, description: v }))} className="min-w-[100px] max-w-[200px] focus:max-w-[400px] transition-all" />
           <Tooltip content="Flow settings">

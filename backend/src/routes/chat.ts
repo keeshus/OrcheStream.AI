@@ -4,7 +4,7 @@ import { chatSessions, chatMessages, flows, llmEndpoints, mcpServers, embeddingP
 import { eq, desc, inArray } from 'drizzle-orm';
 import { requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/async-handler.js';
-import { getStore } from '../vector-stores/index.js';
+import { getStore } from 'orchestream-ai-shared';
 
 const router = Router();
 
@@ -192,6 +192,9 @@ router.post('/chat/sessions/:sessionId/messages', requirePermission('chat:create
         flowContext: flow.flow_context || '',
         groupId: flow.group_id || undefined,
       },
+      // chat_input stays available as flow data (output-node inputFields and
+      // {{input.chat_input.…}} template variables) — the engine never sends it
+      // to the LLM automatically (prompt-only contract).
       { chat_input: { message, history: historyMessages }, message, history: historyMessages },
       async (nodeId, event) => {
         // Stream tool call feedback

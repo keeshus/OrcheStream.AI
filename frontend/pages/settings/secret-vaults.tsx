@@ -9,6 +9,8 @@ import { useAuth } from '@/lib/auth-context';
 import { useAssistantContext } from '@/hooks/useAssistantContext';
 import { useConfirm } from '@/lib/useConfirm';
 import { Tooltip } from '@/components/ui/Tooltip';
+import { BrandLogo } from '@/components/BrandLogo';
+import * as Separator from '@radix-ui/react-separator';
 
 interface Group {
   id: string;
@@ -195,12 +197,20 @@ export default function SecretVaultsPage() {
 
   return (
     <div className="min-h-screen bg-surface-container">
-      <div className="max-w-4xl mx-auto p-6">
+            <div className="max-w-4xl mx-auto p-6">
         {/* Header */}
         <div className="flex items-center gap-3 mb-6">
-          <Link href="/settings" className="flex items-center gap-1 leading-none text-on-surface-variant hover:text-on-surface-variant">
-            <Icon name="arrow_back" className="text-base" /> <span>Back</span>
-          </Link>
+          <div className="flex items-center gap-3">
+            <Link href="/" className="flex items-center gap-1.5 shrink-0 leading-none text-on-surface-variant hover:text-on-surface-variant" title="Home">
+              <BrandLogo size="sm" />
+              <span>Home</span>
+            </Link>
+            <Separator.Root orientation="vertical" className="w-px h-6 bg-outline-variant mx-0.5" />
+            <Link href="/settings" className="flex items-center gap-1 leading-none text-on-surface-variant hover:text-on-surface-variant">
+              <Icon name="arrow_back" className="text-base" /> <span>Back</span>
+            </Link>
+          </div>
+          <Separator.Root orientation="vertical" className="w-px h-6 bg-outline-variant" />
           <div className="flex-1">
             <h1 className="text-2xl font-bold text-on-surface">Secret Vaults</h1>
             <p className="text-sm text-on-surface-variant mt-1">

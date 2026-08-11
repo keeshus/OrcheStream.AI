@@ -6,6 +6,7 @@ import { api } from '@/lib/api-client';
 import Link from 'next/link';
 import { Icon } from '@/components/ui/Icon';
 import { TextField } from '@/components/ui/TextField';
+import { BrandLogo } from '@/components/BrandLogo';
 
 export default function ProfilePage() {
   const router = useRouter();
@@ -63,6 +64,10 @@ export default function ProfilePage() {
     <div className="min-h-screen bg-surface-container">
       <div className="max-w-4xl mx-auto p-6">
         <div className="flex items-center gap-3 mb-6">
+          <Link href="/" className="flex items-center gap-1.5 shrink-0 leading-none text-on-surface-variant hover:text-on-surface-variant" title="Home">
+            <BrandLogo size="sm" />
+            <span>Home</span>
+          </Link>
           <Link href={backHref} className="text-on-surface-variant hover:text-on-surface-variant">
             <Icon name="arrow_back" className="text-base" />
           </Link>

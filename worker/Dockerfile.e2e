@@ -14,6 +14,11 @@ COPY backend/package*.json ./backend/
 # npm ci for reproducible builds (exact versions from package-lock.json)
 RUN npm ci -w shared -w worker -w backend && npm cache clean --force
 
+# Build shared so tsx can resolve the compiled package (shared/package.json
+# points main at ./dist/index.js)
+RUN cd shared && npx -p typescript@7.0.2 tsc && cd .. && \
+    node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('shared/package.json','utf8'));p.main='./dist/index.js';p.types='./dist/index.d.ts';p.exports={'.':{types:'./dist/index.d.ts',default:'./dist/index.js'},'./types':{types:'./dist/types/index.d.ts',default:'./dist/types/index.js'},'./thinking':{types:'./dist/types/thinking.d.ts',default:'./dist/types/thinking.js'}};fs.writeFileSync('shared/package.json',JSON.stringify(p,null,2))"
+
 COPY worker/tsconfig.json ./worker/
 COPY worker/src ./worker/src/
 COPY backend/tsconfig.json ./backend/

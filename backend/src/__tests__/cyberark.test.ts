@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
-const cyberark = await import('../services/cyberark.js');
+const cyberark = await import('orchestream-ai-shared');
 
 const CONFIG = {
   baseUrl: 'https://conjur.example.com',

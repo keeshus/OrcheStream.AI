@@ -1,17 +1,16 @@
 import { Router } from 'express';
 import { eq, and, desc, sql, inArray, isNull, or } from 'drizzle-orm';
 import { db } from '../db/connection.js';
-import { executions, executionSteps, flows, llmEndpoints, mcpServers, embeddingProviders, vectorStores, groups, groupMembers, users, agentContexts, agentStore, secretAccessLog, userAssignments } from '../db/schema.js';
+import { executions, executionSteps, flows, groups, groupMembers, users, agentContexts, agentStore, secretAccessLog, userAssignments } from '../db/schema.js';
 import { FlowExecutor, HitlPauseError, FlowStopError, PauseExecutionError } from '../../../worker/src/executor/engine.js';
-import { executionQueue } from '../../../worker/src/queue.js';
-import { getStore, listStores } from '../vector-stores/index.js';
+import { executionQueue, enqueueExecution } from '../../../worker/src/queue.js';
+import { buildExecutionContext } from '../../../worker/src/executor/context.js';
 import { requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/async-handler.js';
 import { logger } from '../utils/logger.js';
 import type { SSEEvent, FlowDefinition, ExecutionStep, EnvVarEntry } from 'orchestream-ai-shared';
 import { createSidecarClient, createSandboxManager } from '../../../worker/src/sandbox/index.js';
 
-const secretStore = new Map<string, string>();
 const router = Router();
 
 // In-memory registry of active executors for cancellation
@@ -221,8 +220,19 @@ router.post(
     res.flushHeaders();
 
     // Helper to emit SSE data frames ------------------------------
+    // Persisted runs are fire-and-forget: the frontend cancels the SSE stream
+    // after confirming the run started, so the socket closes while the
+    // execution is still running. Skip writes once the client is gone instead
+    // of crashing on a destroyed stream — the DB persistence happens in the
+    // onEvent callback before emitSSE, so nothing is lost.
+    let clientGone = false;
     const emitSSE = (data: SSEEvent) => {
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
+      if (clientGone || res.writableEnded) return;
+      try {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        clientGone = true;
+      }
     };
 
     // Use canvas state if provided (debug runs from editor), otherwise load from DB
@@ -292,186 +302,7 @@ router.post(
       timestamp: new Date().toISOString(),
     });
 
-    // Initialize sandbox for this execution
-    const sidecarClient = createSidecarClient();
-    const sandboxManager = createSandboxManager(sidecarClient);
-    const sandboxExecutionId = execId;
-
-    try {
-      await sandboxManager.setup(sandboxExecutionId);
-    } catch (err) {
-      console.error(`Sandbox setup failed for ${sandboxExecutionId}:`, err);
-      // Non-fatal
-    }
-
-    // Build execution context: resolve LLM endpoints from DB ------
-    const executionContext: import('../../../worker/src/executor/engine.js').ExecutionContext = {
-      currentExecutionId: execId,
-      getEndpoint: async (endpointId: string) => {
-        const [endpoint] = await db
-          .select()
-          .from(llmEndpoints)
-          .where(eq(llmEndpoints.id, endpointId));
-        if (!endpoint) return null;
-        if (endpoint.group_id && endpoint.group_id !== flowGroupId) return null;
-        return {
-          providerType: endpoint.provider_type as 'anthropic' | 'openai' | 'litellm',
-          apiKey: endpoint.api_key,
-          baseUrl: endpoint.base_url ?? null,
-        };
-      },
-      getMCPServer: async (serverId: string) => {
-        const [server] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
-        if (!server) return null;
-        if (server.group_id && server.group_id !== flowGroupId) return null;
-        return {
-          id: server.id,
-          name: server.name,
-          url: server.url,
-          tools: server.tools as any[],
-          enabled: server.enabled,
-        };
-      },
-      getEmbeddingProvider: async (providerId: string) => {
-        const [ep] = await db.select().from(embeddingProviders).where(eq(embeddingProviders.id, providerId));
-        if (!ep) return null;
-        if (ep.group_id && ep.group_id !== flowGroupId) return null;
-        return { providerType: ep.provider_type, apiKey: ep.api_key, baseUrl: ep.base_url, model: ep.model };
-      },
-      getVectorStore: async (storeId: string) => {
-        const [vs] = await db.select().from(vectorStores).where(eq(vectorStores.id, storeId));
-        if (!vs) return null;
-        if (vs.group_id && vs.group_id !== flowGroupId) return null;
-        return { name: vs.name, url: vs.url, apiKey: vs.api_key };
-      },
-      getFlow: async (flowId: string, ancestry?: string[]) => {
-        const [flow] = await db.select().from(flows).where(eq(flows.id, flowId));
-        if (!flow) return null;
-        if (ancestry?.includes(flowId)) {
-          throw new Error(`Circular subflow reference detected: ${ancestry.join(' -> ')} -> ${flow.name}`);
-        }
-        return {
-          id: flow.id,
-          name: flow.name,
-          description: flow.description || '',
-          nodes: flow.nodes as any,
-          edges: flow.edges as any,
-          version: flow.version,
-          envVars: flow.env_vars as EnvVarEntry[] | undefined,
-          createdAt: flow.created_at?.toISOString() || '',
-          updatedAt: flow.updated_at?.toISOString() || '',
-        };
-      },
-      onSubExecution: async (data) => {
-        if (isDebug) return `debug_sub_${Date.now()}`;
-        const [subExec] = await db.insert(executions).values({
-          flow_id: data.subflowId,
-          parent_execution_id: data.parentExecutionId,
-          subflow_node_id: data.subflowNodeId,
-          subflow_depth: data.depth,
-          status: 'running',
-          input: data.input,
-          started_at: new Date(),
-        }).returning();
-        return subExec.id;
-      },
-      completeSubExecution: async (subExecutionId, output, status, error) => {
-        if (isDebug) return;
-        await db.update(executions).set({
-          status,
-          output: output as any,
-          error: error || null,
-          completed_at: new Date(),
-        }).where(eq(executions.id, subExecutionId));
-      },
-      getGlobalContext: async () => {
-        const [row] = await db.select().from(agentStore).where(eq(agentStore.key, 'global_context')).limit(1);
-        return (row?.value as string) || '';
-      },
-      getGroupContext: async (groupId: string) => {
-        if (!groupId) return '';
-        const [row] = await db.select({ context: groups.context }).from(groups).where(eq(groups.id, groupId)).limit(1);
-        return row?.context || '';
-      },
-      getAgentContexts: async (contextIds: string[]) => {
-        if (!contextIds?.length) return [];
-        const rows = await db.select().from(agentContexts).where(inArray(agentContexts.id, contextIds));
-        return rows.map(r => ({ title: r.title, content: r.content }));
-      },
-      getSecret: async (secretName: string, options?: { scope?: 'app' | 'group' | 'flow' }) => {
-        const { secrets: secretsTable } = await import('../db/schema.js');
-        const { and, eq } = await import('drizzle-orm');
-        const scope = options?.scope || 'app';
-        const [secret] = await db.select().from(secretsTable).where(
-          and(eq(secretsTable.name, secretName), eq(secretsTable.scope, scope))
-        ).limit(1);
-        if (!secret || !secret.encrypted_value || !secret.encryption_iv || !secret.encryption_tag) return null;
-        const { decrypt } = await import('../utils/encryption.js');
-        return decrypt(secret.encrypted_value, secret.encryption_iv, secret.encryption_tag, secret.key_version);
-      },
-      getCyberArkSecret: async (variableId: string) => {
-        const { getSecret: conjurGetSecret } = await import('../services/cyberark.js');
-        const { secretVaults: vaultsTable, groupVaultConfig: gvcTable } = await import('../db/schema.js');
-        const { eq } = await import('drizzle-orm');
-
-        let vaultId: string | undefined;
-        if (flowGroupId) {
-          const [gvc] = await db.select({ vaultId: gvcTable.vault_id }).from(gvcTable).where(eq(gvcTable.group_id, flowGroupId)).limit(1);
-          if (gvc && gvc.vaultId) vaultId = gvc.vaultId;
-        }
-        const vaultCondition = vaultId ? eq(vaultsTable.id, vaultId) : eq(vaultsTable.is_connected, true);
-        const [vault] = await db.select().from(vaultsTable).where(vaultCondition).limit(1);
-        if (!vault) return null;
-        const keyParts = vault.api_key.split(':');
-        const { decrypt } = await import('../utils/encryption.js');
-        const apiKey = await decrypt(keyParts[0], keyParts[1], keyParts[2], parseInt(keyParts[3]));
-        return conjurGetSecret({
-          baseUrl: vault.base_url,
-          account: vault.account,
-          login: vault.login,
-          apiKey,
-          caCert: vault.ca_cert || undefined,
-          selfHosted: vault.self_hosted,
-        }, variableId);
-      },
-      setSecret: (name: string, value: string) => {
-        secretStore.set(name, value);
-      },
-      logSecretAccess: (entry: { name: string; action: string; source: string }) => {
-        // Fire-and-forget audit log
-        db.insert(secretAccessLog).values({
-          action: entry.action,
-          metadata: { secretName: entry.name, source: entry.source, executionId: flowId },
-          created_at: new Date(),
-        }).catch(() => {});
-      },
-      sandboxExecutionId,
-      sandboxEnv: (input as any)?.__env || {},
-    };
-
-    // Resolve flow-level env vars (static, core_secret, cyberark) into sandboxEnv
-    const inputEnv: Record<string, string> = (input as any)?.__env || {};
-    const flowEnvVars = flowDefEnvVars;
-    if (Array.isArray(flowEnvVars)) {
-      for (const entry of flowEnvVars) {
-        if (entry.type === 'static' || !entry.type) {
-          inputEnv[entry.name] = entry.value;
-        } else if (entry.type === 'core_secret' && executionContext.getSecret) {
-          try {
-            const secretVal = await executionContext.getSecret(entry.value);
-            if (secretVal) inputEnv[entry.name] = secretVal;
-          } catch {}
-        } else if (entry.type === 'cyberark' && executionContext.getCyberArkSecret) {
-          try {
-            const cyberVal = await executionContext.getCyberArkSecret(entry.value);
-            if (cyberVal) inputEnv[entry.name] = cyberVal;
-          } catch {}
-        }
-      }
-    }
-    executionContext.sandboxEnv = inputEnv;
-
-    // Map Drizzle row (snake_case) to FlowDefinition (camelCase) BEFORE building context
+    // Map Drizzle row (snake_case) to FlowDefinition (camelCase)
     const flowDef: FlowDefinition = {
       id: flowId,
       name: flowName,
@@ -483,235 +314,143 @@ router.post(
       updatedAt: new Date().toISOString(),
       flowContext: flowContext,
       groupId: flowGroupId,
+      envVars: flowDefEnvVars as EnvVarEntry[] | undefined,
     };
 
-    // Add flowNodes/flowEdges to context now that flowDef exists
-    executionContext.flowNodes = flowDef.nodes as any;
-    executionContext.flowEdges = flowDef.edges as any;
-    executionContext.searchSimilar = async (collectionName, queryEmbedding, topK, minScore) => {
-      const store = getStore('qdrant') || getStore('pgvector') || listStores().length > 0 ? getStore(listStores()[0]) : undefined;
-      if (!store) return [];
-      return store.search(collectionName, queryEmbedding, topK, minScore);
-    };
+    if (isDebug) {
+      // ── Debug runs: execute in-process, stream every event to the overlay ──
+      // Initialize sandbox for this execution
+      const sidecarClient = createSidecarClient();
+      const sandboxManager = createSandboxManager(sidecarClient);
+      const sandboxExecutionId = execId;
 
-    const executor = new FlowExecutor();
-    activeExecutors.set(execId, executor);
+      try {
+        await sandboxManager.setup(sandboxExecutionId);
+      } catch (err) {
+        console.error(`Sandbox setup failed for ${sandboxExecutionId}:`, err);
+        // Non-fatal
+      }
 
-    res.on('close', () => {
-      executor.abort();
-      activeExecutors.delete(execId);
-    });
-
-    let skipTeardown = false;
-    try {
-      const result = await executor.execute(
-        flowDef,
-        input as Record<string, unknown>,
-        // onEvent: persist steps + stream to client ---------------
-        async (nodeId, event) => {
-          // Attach the execution ID (the engine sets it to '' initially)
-          const richEvent: SSEEvent = {
-            ...event,
-            executionId: execId,
-          };
-
-          // Persist step lifecycle to the database
-          if (!isDebug) {
-            const data = event.data;
-            const hierarchy = event.hierarchy || (data.hierarchy as { path: string; depth: number } | undefined);
-            // For subflow steps, prefix node ID with parent hierarchy for unique identification
-            const prefix = hierarchy ? hierarchy.path.replace(/->/g, ':') + ':' : '';
-            const resolvedNodeId = (data.nodeId as string) || nodeId;
-            const hierarchicalNodeId = prefix ? `${prefix}${resolvedNodeId}` : resolvedNodeId;
-            const resolvedNodeType = (data.nodeType as string) || '';
-            const iter = (data as any).iteration ?? 0;
-
-            if (event.type === 'step.started') {
-              await db.insert(executionSteps).values({
-                execution_id: exec.id, node_id: hierarchicalNodeId, node_type: resolvedNodeType,
-                node_label: data.nodeLabel as string | null, iteration: iter,
-                status: 'running', input: data.input as any, started_at: new Date(),
-                hierarchy: hierarchy as any || null,
-              });
-            } else if (event.type === 'step.completed') {
-              await db.update(executionSteps).set({
-                status: 'completed', output: data.output as any, completed_at: new Date(),
-                hierarchy: hierarchy as any || null,
-              }).where(and(eq(executionSteps.execution_id, exec.id), eq(executionSteps.node_id, hierarchicalNodeId)));
-            } else if (event.type === 'step.failed') {
-              await db.update(executionSteps).set({
-                status: 'failed', error: data.error as string, completed_at: new Date(),
-                hierarchy: hierarchy as any || null,
-              }).where(and(eq(executionSteps.execution_id, exec.id), eq(executionSteps.node_id, hierarchicalNodeId)));
-            }
-          }
-
-          // Stream event to the SSE client
-          emitSSE(richEvent);
+      // Build the execution context — shared with the worker runner, so debug
+      // and persisted runs behave identically.
+      const executionContext: import('../../../worker/src/executor/engine.js').ExecutionContext = await buildExecutionContext({
+        db,
+        flow: flowDef,
+        input: input as Record<string, unknown>,
+        executionId: execId,
+        sandboxEnv: {},
+        onSubExecution: async () => `debug_sub_${Date.now()}`,
+        completeSubExecution: async () => {},
+        logSecretAccess: (entry) => {
+          db.insert(secretAccessLog).values({
+            action: entry.action,
+            metadata: { secretName: entry.name, source: entry.source, executionId: flowId },
+            created_at: new Date(),
+          }).catch(() => {});
         },
-        executionContext,
-      );
-
-      // Mark execution as completed in DB
-      if (!isDebug) {
-        const completedOutput = { ...(result.output as object || {}), _flowSnapshot: flowSnapshot };
-        await db
-          .update(executions)
-          .set({
-            status: 'completed',
-            output: completedOutput as any,
-            completed_at: new Date(),
-          })
-          .where(eq(executions.id, exec.id));
-      }
-
-      activeExecutors.delete(execId);
-      emitSSE({
-        type: 'execution.completed',
-        executionId: execId,
-        data: { output: result.output, steps: result.steps },
-        timestamp: new Date().toISOString(),
       });
-    } catch (err: unknown) {
-      // Handle FlowStop — terminate execution immediately
-      if (err instanceof FlowStopError) {
+
+      const executor = new FlowExecutor();
+      activeExecutors.set(execId, executor);
+
+      res.on('close', () => {
+        executor.abort();
         activeExecutors.delete(execId);
-        if (!isDebug) {
-          await db
-            .update(executions)
-            .set({
-              status: err.status as any,
-              error: err.message,
-              completed_at: new Date(),
-            })
-            .where(eq(executions.id, exec.id));
-        }
-
-        emitSSE({
-          type: 'execution.stopped',
-          executionId: execId,
-          data: { status: err.status, message: err.message },
-          timestamp: new Date().toISOString(),
-        });
-        res.end();
-        return;
-      }
-
-      // Handle HITL pause — save partial outputs and await approval
-      if (err instanceof HitlPauseError) {
-        skipTeardown = true;
-        activeExecutors.delete(execId);
-        const hitlCfg = (flowDef.nodes || []).find((n: any) => n.id === err.nodeId)?.data?.config || {};
-        if (!isDebug) {
-          await db
-            .update(executions)
-            .set({
-              status: 'awaiting_approval',
-              output: { ...err.savedOutputs, _flowSnapshot: flowSnapshot, _hitlButtons: err.buttons, _hitlPrompt: err.prompt, _hitlAllowFeedback: (hitlCfg as any).allowFeedback !== false, _hitlNodeId: err.nodeId, _pausedAt: Date.now(), _nextIteration: 1 } as any,
-              pending_hitls: JSON.stringify([{
-                nodeId: err.nodeId,
-                prompt: err.prompt,
-                buttons: err.buttons,
-                savedOutputs: err.savedOutputs,
-                assignmentType: err.assignmentType,
-                assignees: err.assignees,
-                requiredApprovals: err.requiredApprovals,
-              }]) as any,
-            })
-            .where(eq(executions.id, exec.id));
-
-          // Mirror the paused HITL into the assignments table so the
-          // co-pilot's list_assignments / decide_assignment tools and the
-          // /api/assignments endpoints operate on real data.
-          try {
-            const [pauseFlow] = await db
-              .select({ created_by: flows.created_by })
-              .from(flows)
-              .where(eq(flows.id, exec.flow_id))
-              .limit(1);
-            await db.insert(userAssignments).values({
-              execution_id: exec.id,
-              hitl_node_id: err.nodeId,
-              assigned_to_user_id: err.assignedUserId || err.assignees?.userIds?.[0] || pauseFlow?.created_by || req.user!.userId,
-              assigned_to_role_id: err.assignedRoleId || null,
-              assigned_to_group_id: err.assignedGroupId || err.assignees?.groupIds?.[0] || null,
-              status: 'pending',
-            });
-          } catch (insertErr) {
-            console.error('Failed to create assignment for HITL pause:', insertErr);
-          }
-        }
-
-        emitSSE({
-          type: 'execution.paused',
-          executionId: execId,
-          data: { nodeId: err.nodeId, savedOutputs: err.savedOutputs, buttons: err.buttons, prompt: err.prompt, allowFeedback: (hitlCfg as any).allowFeedback !== false, message: 'Waiting for human approval' },
-          timestamp: new Date().toISOString(),
-        });
-        res.end();
-        return;
-      }
-
-      // Handle delay pause — persist resume info and schedule a delayed re-run
-      if (err instanceof PauseExecutionError) {
-        activeExecutors.delete(execId);
-        if (!isDebug) {
-          await db
-            .update(executions)
-            .set({
-              status: 'running',
-              output: { ...err.savedOutputs, _flowSnapshot: flowSnapshot, _delayNodeId: err.nodeId, _delayMs: err.resumeDelay, _delayResumeAt: Date.now() + err.resumeDelay } as any,
-            })
-            .where(eq(executions.id, exec.id));
-          await executionQueue.add(
-            'execute-flow',
-            { flow: flowDef, input: { ...input, __executionId: exec.id, __replayFrom: err.nodeId, __replayOutputs: err.savedOutputs } },
-            { delay: err.resumeDelay, attempts: 3, backoff: { type: 'exponential', delay: 2000 } },
-          );
-        }
-
-        emitSSE({
-          type: 'execution.paused',
-          executionId: execId,
-          data: { nodeId: err.nodeId, delayMs: err.resumeDelay, resumeAt: Date.now() + err.resumeDelay, message: 'Waiting for delay' },
-          timestamp: new Date().toISOString(),
-        });
-        res.end();
-        return;
-      }
-
-      const error = err instanceof Error ? err.message : String(err);
-      console.error('Flow execution failed:', error);
-      activeExecutors.delete(execId);
-
-      if (!isDebug) {
-        await db
-          .update(executions)
-          .set({
-            status: 'failed',
-            error,
-            completed_at: new Date(),
-          })
-          .where(eq(executions.id, exec.id));
-      }
-
-      emitSSE({
-        type: 'execution.failed',
-        executionId: execId,
-        data: { error },
-        timestamp: new Date().toISOString(),
       });
-    } finally {
-      if (!skipTeardown) {
-        sandboxManager.teardown(sandboxExecutionId).catch(err => {
-          console.error(`Sandbox teardown failed for ${sandboxExecutionId}:`, err);
+
+      let skipTeardown = false;
+      try {
+        const result = await executor.execute(
+          flowDef,
+          input as Record<string, unknown>,
+          // onEvent: stream events to the debug overlay (no persistence)
+          async (nodeId, event) => {
+            const richEvent: SSEEvent = { ...event, executionId: execId };
+            emitSSE(richEvent);
+          },
+          executionContext,
+        );
+
+        activeExecutors.delete(execId);
+        emitSSE({
+          type: 'execution.completed',
+          executionId: execId,
+          data: { output: result.output, steps: result.steps },
+          timestamp: new Date().toISOString(),
         });
+      } catch (err: unknown) {
+        // Handle FlowStop — terminate execution immediately
+        if (err instanceof FlowStopError) {
+          activeExecutors.delete(execId);
+          emitSSE({
+            type: 'execution.stopped',
+            executionId: execId,
+            data: { status: err.status, message: err.message },
+            timestamp: new Date().toISOString(),
+          });
+          res.end();
+          return;
+        }
+
+        // Handle HITL pause — the overlay shows the approval prompt
+        if (err instanceof HitlPauseError) {
+          skipTeardown = true;
+          activeExecutors.delete(execId);
+          const hitlCfg = (flowDef.nodes || []).find((n: any) => n.id === err.nodeId)?.data?.config || {};
+          emitSSE({
+            type: 'execution.paused',
+            executionId: execId,
+            data: { nodeId: err.nodeId, savedOutputs: err.savedOutputs, buttons: err.buttons, prompt: err.prompt, allowFeedback: (hitlCfg as any).allowFeedback !== false, message: 'Waiting for human approval' },
+            timestamp: new Date().toISOString(),
+          });
+          res.end();
+          return;
+        }
+
+        // Handle delay pause in debug — just inform the client
+        if (err instanceof PauseExecutionError) {
+          activeExecutors.delete(execId);
+          emitSSE({
+            type: 'execution.paused',
+            executionId: execId,
+            data: { nodeId: err.nodeId, delayMs: err.resumeDelay, resumeAt: Date.now() + err.resumeDelay, message: 'Waiting for delay' },
+            timestamp: new Date().toISOString(),
+          });
+          res.end();
+          return;
+        }
+
+        const error = err instanceof Error ? err.message : String(err);
+        console.error('Flow execution failed:', error);
+        activeExecutors.delete(execId);
+
+        emitSSE({
+          type: 'execution.failed',
+          executionId: execId,
+          data: { error },
+          timestamp: new Date().toISOString(),
+        });
+      } finally {
+        if (!skipTeardown) {
+          sandboxManager.teardown(sandboxExecutionId).catch(err => {
+            console.error(`Sandbox teardown failed for ${sandboxExecutionId}:`, err);
+          });
+        }
       }
+
+      res.end();
+      return;
     }
 
+    // ── Persisted runs: fire-and-forget via the worker queue ──────────
+    // The worker executes the flow with the same shared context builder and
+    // persists steps/HITL/delays. The SSE stream only confirms the start —
+    // the frontend cancels it right after (api.flows.execute).
+    await enqueueExecution(flowDef, { ...(input as Record<string, unknown>), __executionId: execId });
     res.end();
   }),
 );
+
 
 // ── POST /api/executions/:executionId/approve — approve HITL and resume flow ──
 
@@ -904,141 +643,6 @@ router.post('/executions/:executionId/approve', asyncHandler(async (req, res) =>
     };
   }
 
-  const executionContext: import('../../../worker/src/executor/engine.js').ExecutionContext = {
-    currentExecutionId: exec.id,
-    getEndpoint: async (endpointId: string) => {
-      const [ep] = await db.select().from(llmEndpoints).where(eq(llmEndpoints.id, endpointId));
-      if (!ep) return null;
-      if (ep.group_id && ep.group_id !== flowDef?.groupId) return null;
-      return { providerType: ep.provider_type as 'anthropic' | 'openai' | 'litellm', apiKey: ep.api_key, baseUrl: ep.base_url };
-    },
-    getMCPServer: async (serverId: string) => {
-      const [server] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
-      if (!server) return null;
-      if (server.group_id && server.group_id !== flowDef?.groupId) return null;
-      return { id: server.id, name: server.name, url: server.url, tools: server.tools as any[], enabled: server.enabled };
-    },
-    getEmbeddingProvider: async (providerId: string) => {
-      const [ep] = await db.select().from(embeddingProviders).where(eq(embeddingProviders.id, providerId));
-      if (!ep) return null;
-      if (ep.group_id && ep.group_id !== flowDef?.groupId) return null;
-      return { providerType: ep.provider_type, apiKey: ep.api_key, baseUrl: ep.base_url, model: ep.model };
-    },
-    getVectorStore: async (storeId: string) => {
-      const [vs] = await db.select().from(vectorStores).where(eq(vectorStores.id, storeId));
-      if (!vs) return null;
-      if (vs.group_id && vs.group_id !== flowDef?.groupId) return null;
-      return { name: vs.name, url: vs.url, apiKey: vs.api_key };
-    },
-    getFlow: async (flowId: string, ancestry?: string[]) => {
-      const [flow] = await db.select().from(flows).where(eq(flows.id, flowId));
-      if (!flow) return null;
-      if (ancestry?.includes(flowId)) {
-        throw new Error(`Circular subflow reference detected: ${ancestry.join(' -> ')} -> ${flow.name}`);
-      }
-      return {
-        id: flow.id,
-        name: flow.name,
-        description: flow.description || '',
-        nodes: flow.nodes as any,
-        edges: flow.edges as any,
-        version: flow.version,
-        envVars: flow.env_vars as EnvVarEntry[] | undefined,
-        createdAt: flow.created_at?.toISOString() || '',
-        updatedAt: flow.updated_at?.toISOString() || '',
-      };
-    },
-    onSubExecution: async (data) => {
-      const [subExec] = await db.insert(executions).values({
-        flow_id: data.subflowId,
-        parent_execution_id: data.parentExecutionId,
-        subflow_node_id: data.subflowNodeId,
-        subflow_depth: data.depth,
-        status: 'running',
-        input: data.input,
-        started_at: new Date(),
-      }).returning();
-      return subExec.id;
-    },
-    completeSubExecution: async (subExecutionId, output, status, error) => {
-      await db.update(executions).set({
-        status,
-        output: output as any,
-        error: error || null,
-        completed_at: new Date(),
-      }).where(eq(executions.id, subExecutionId));
-    },
-    searchSimilar: async (collectionName, queryEmbedding, topK, minScore) => {
-      const store = getStore('qdrant') || getStore('pgvector') || listStores().length > 0 ? getStore(listStores()[0]) : undefined;
-      if (!store) return [];
-      return store.search(collectionName, queryEmbedding, topK, minScore);
-    },
-    getGlobalContext: async () => {
-      const [row] = await db.select().from(agentStore).where(eq(agentStore.key, 'global_context')).limit(1);
-      return (row?.value as string) || '';
-    },
-    getGroupContext: async (groupId: string) => {
-      if (!groupId) return '';
-      const [row] = await db.select({ context: groups.context }).from(groups).where(eq(groups.id, groupId)).limit(1);
-      return row?.context || '';
-    },
-    getAgentContexts: async (contextIds: string[]) => {
-      if (!contextIds?.length) return [];
-      const rows = await db.select().from(agentContexts).where(inArray(agentContexts.id, contextIds));
-      return rows.map(r => ({ title: r.title, content: r.content }));
-    },
-    getSecret: async (secretName: string, options?: { scope?: 'app' | 'group' | 'flow' }) => {
-      const { secrets: secretsTable } = await import('../db/schema.js');
-      const { and, eq } = await import('drizzle-orm');
-      const scope = options?.scope || 'app';
-      const [secret] = await db.select().from(secretsTable).where(
-        and(eq(secretsTable.name, secretName), eq(secretsTable.scope, scope))
-      ).limit(1);
-      if (!secret || !secret.encrypted_value || !secret.encryption_iv || !secret.encryption_tag) return null;
-      const { decrypt } = await import('../utils/encryption.js');
-      return decrypt(secret.encrypted_value, secret.encryption_iv, secret.encryption_tag, secret.key_version);
-    },
-    getCyberArkSecret: async (variableId: string) => {
-      const { getSecret: conjurGetSecret } = await import('../services/cyberark.js');
-      const { secretVaults: vaultsTable, groupVaultConfig: gvcTable } = await import('../db/schema.js');
-      const { eq } = await import('drizzle-orm');
-      let vaultId: string | undefined;
-      if (flowDef?.groupId) {
-        const [gvc] = await db.select({ vaultId: gvcTable.vault_id }).from(gvcTable).where(eq(gvcTable.group_id, flowDef.groupId)).limit(1);
-        if (gvc && gvc.vaultId) vaultId = gvc.vaultId;
-      }
-      const vaultCondition = vaultId ? eq(vaultsTable.id, vaultId) : eq(vaultsTable.is_connected, true);
-      const [vault] = await db.select().from(vaultsTable).where(vaultCondition).limit(1);
-      if (!vault) return null;
-      const keyParts = vault.api_key.split(':');
-      const { decrypt } = await import('../utils/encryption.js');
-      const apiKey = await decrypt(keyParts[0], keyParts[1], keyParts[2], parseInt(keyParts[3]));
-      return conjurGetSecret({
-        baseUrl: vault.base_url,
-        account: vault.account,
-        login: vault.login,
-        apiKey,
-        caCert: vault.ca_cert || undefined,
-        selfHosted: vault.self_hosted,
-      }, variableId);
-    },
-    setSecret: (name: string, value: string) => {
-      secretStore.set(name, value);
-    },
-    logSecretAccess: (entry: { name: string; action: string; source: string }) => {
-      db.insert(secretAccessLog).values({
-        action: entry.action,
-        metadata: { secretName: entry.name, source: entry.source, executionId: flowDef?.id },
-        created_at: new Date(),
-      }).catch(() => {});
-    },
-    flowNodes: flowDef.nodes as any,
-    flowEdges: flowDef.edges as any,
-    sandboxExecutionId: executionId,
-    sandboxEnv: (exec.input as any)?.__env || {},
-  };
-
-  const executor = new FlowExecutor();
   const savedOutputs = hitlEntry.savedOutputs || {};
   const mergedInput = { ...(exec.input || {}), _approved: true, _feedback: feedback, _decision: decision, ...userData };
 
@@ -1056,129 +660,27 @@ router.post('/executions/:executionId/approve', asyncHandler(async (req, res) =>
   // still pause for their own approval.
   const replayOutputs = { ...savedOutputs, [`${hitlEntry.nodeId}:__approved`]: { decision, feedback } };
 
-  try {
-    const persistStep = async (_nodeId: string, event: SSEEvent) => {
-      const data = event.data;
-      const hierarchy = event.hierarchy || (data.hierarchy as { path: string; depth: number } | undefined);
-      const prefix = hierarchy ? hierarchy.path.replace(/->/g, ':') + ':' : '';
-      const resolvedNodeId = (data.nodeId as string) || _nodeId;
-      const hierarchicalNodeId = prefix ? `${prefix}${resolvedNodeId}` : resolvedNodeId;
-      const resolvedNodeType = (data.nodeType as string) || '';
-      const iter = (data as any).iteration ?? 0;
-      try {
-        if (event.type === 'step.started') {
-          // Complete any existing running rows for this node (e.g., from a prior HITL pause)
-          await db.update(executionSteps).set({ status: 'completed', completed_at: new Date() })
-            .where(and(eq(executionSteps.execution_id, exec.id), eq(executionSteps.node_id, hierarchicalNodeId), eq(executionSteps.status, 'running')));
-          // Upsert: update existing row for this (exec, node, iteration) or insert new
-          const [existing] = await db.select({ id: executionSteps.id })
-            .from(executionSteps)
-            .where(and(eq(executionSteps.execution_id, exec.id), eq(executionSteps.node_id, hierarchicalNodeId), eq(executionSteps.iteration, iter)))
-            .limit(1);
-          if (existing) {
-            await db.update(executionSteps).set({
-              status: 'running', input: data.input as any, started_at: new Date(),
-              hierarchy: hierarchy as any || null,
-            }).where(eq(executionSteps.id, existing.id));
-          } else {
-            await db.insert(executionSteps).values({
-              execution_id: exec.id, node_id: hierarchicalNodeId, node_type: resolvedNodeType,
-              node_label: data.nodeLabel as string | null, iteration: iter,
-              status: 'running', input: data.input as any, started_at: new Date(),
-              hierarchy: hierarchy as any || null,
-            });
-          }
-        } else if (event.type === 'step.completed') {
-          await db.update(executionSteps).set({
-            status: 'completed', output: data.output as any, completed_at: new Date(),
-            hierarchy: hierarchy as any || null,
-          }).where(and(
-            eq(executionSteps.execution_id, exec.id),
-            eq(executionSteps.node_id, hierarchicalNodeId),
-            eq(executionSteps.iteration, iter),
-          ));
-        } else if (event.type === 'step.failed') {
-          await db.update(executionSteps).set({
-            status: 'failed', error: data.error as string, completed_at: new Date(),
-            hierarchy: hierarchy as any || null,
-          }).where(and(
-            eq(executionSteps.execution_id, exec.id),
-            eq(executionSteps.node_id, hierarchicalNodeId),
-            eq(executionSteps.iteration, iter),
-          ));
-        }
-      } catch (e) { logger.error({ error: String(e), executionId: exec.id, nodeId: hierarchicalNodeId }, 'Failed to persist step'); }
-    };
-    const result = await executor.execute(
-      flowDef,
-      mergedInput,
-      persistStep,
-      executionContext,
-      { replayFrom: hitlEntry.nodeId, replayOutputs, inputOverride: mergedInput, initialIteration: (exec.output as any)?._nextIteration ?? 1 },
-    );
+  // Resume via the worker queue — the runner replays from the HITL node with
+  // the saved outputs, the decision override, and the accumulated iteration.
+  await executionQueue.add(
+    'execute-flow',
+    {
+      flow: flowDef,
+      input: {
+        ...(exec.input || {}),
+        __executionId: exec.id,
+        __replayFrom: hitlEntry.nodeId,
+        __replayOutputs: replayOutputs,
+        __replayOverride: mergedInput,
+        __initialIteration: (exec.output as any)?._nextIteration ?? 1,
+      },
+    },
+    { attempts: 3, backoff: { type: 'exponential', delay: 2000 } },
+  );
 
-    // Calculate total paused time (if any)
-    const prevPausedAt = (exec.output as any)?._pausedAt;
-    const prevPausedTotal = (exec.output as any)?._pausedTotal || 0;
-    const pausedTotal = prevPausedAt ? prevPausedTotal + (Date.now() - prevPausedAt) : prevPausedTotal;
-
-    // Success — no more HITLs hit. Mark execution as completed (UPDATE, don't create new).
-    await db
-      .update(executions)
-      .set({
-        status: 'completed',
-        output: { ...(result.output as object), _pausedTotal: pausedTotal } as any,
-        pending_hitls: JSON.stringify([]) as any,
-        completed_at: new Date(),
-      })
-      .where(eq(executions.id, exec.id));
-
-      res.json({ status: 'completed', executionId: exec.id, output: result.output });
-    } catch (err) {
-      if (err instanceof HitlPauseError) {
-        // Another HITL was hit — add to pending list, set back to awaiting_approval
-        const stillPending = pendingHitls.filter((h: any) => h.nodeId !== hitlEntry.nodeId);
-        const newHitls = [...stillPending, {
-          nodeId: err.nodeId, prompt: err.prompt, buttons: err.buttons,
-          savedOutputs: err.savedOutputs,
-          assignmentType: err.assignmentType,
-          assignees: err.assignees,
-          requiredApprovals: err.requiredApprovals,
-          assignedGroupId: err.assignedGroupId,
-          assignedUserId: err.assignedUserId,
-          assignedRoleId: err.assignedRoleId,
-        }];
-        const currentIter = (exec.output as any)?._nextIteration ?? 1;
-        const prevPausedAt2 = (exec.output as any)?._pausedAt;
-      const prevPausedTotal2 = (exec.output as any)?._pausedTotal || 0;
-      const addPause2 = prevPausedAt2 ? (Date.now() - prevPausedAt2) : 0;
-      await db
-        .update(executions)
-        .set({
-          status: 'awaiting_approval',
-            output: { ...err.savedOutputs, _hitlButtons: err.buttons, _hitlPrompt: err.prompt, _pausedTotal: prevPausedTotal2 + addPause2, _pausedAt: Date.now(), _nextIteration: currentIter + 1 } as any,
-          pending_hitls: JSON.stringify(newHitls) as any,
-        })
-        .where(eq(executions.id, exec.id));
-
-      res.json({ status: 'awaiting_approval', executionId: exec.id, message: 'Another HITL node requires approval' });
-      return;
-    }
-
-    // Handle FlowStopError or any other error
-    const error = err instanceof Error ? err.message : String(err);
-    const isCancelled = err instanceof FlowStopError;
-    await db
-      .update(executions)
-      .set({
-        status: isCancelled ? 'cancelled' : 'failed',
-        error,
-        completed_at: new Date(),
-      })
-      .where(eq(executions.id, exec.id));
-    res.status(500).json({ status: isCancelled ? 'cancelled' : 'failed', error });
-  }
+  res.json({ status: 'running', executionId: exec.id, message: 'Execution resumed via worker' });
 }));
+
 
 // ── DELETE /api/executions/:executionId — delete an execution ──────────────────
 

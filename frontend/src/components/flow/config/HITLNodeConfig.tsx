@@ -328,15 +328,19 @@ export function HITLNodeConfig({ config, onChange, nodeId, nodes, edges }: HITLN
         <span className="text-sm font-medium text-on-surface-variant block mb-2">Assignment</span>
         <SelectField
           label="Assignment type"
-          value={config.assignmentType || 'user'}
-          onChange={(v) => { onChange({ assignmentType: v, assignees: v === 'multi' ? (config.assignees || { userIds: [], roleIds: [] }) : undefined }); }}
+          value={config.assignmentType || 'none'}
+          onChange={(v) => { const assignmentType = v === 'none' ? '' : v; onChange({ assignmentType, assignees: assignmentType === 'multi' ? (config.assignees || { userIds: [], roleIds: [] }) : undefined }); }}
           options={[
+            { value: 'none', label: 'Select assignment type...' },
             { value: 'user', label: 'Specific user' },
             { value: 'group', label: 'Specific group' },
             { value: 'role', label: 'Specific role' },
             ...(mode === 'simple' ? [{ value: 'multi', label: 'Multi-approver' }] : []),
           ]}
         />
+        {!config.assignmentType && (
+          <p className="text-xs text-error mt-1">Please select an assignment type.</p>
+        )}
       </div>
 
       {config.assignmentType === 'user' && (

@@ -54,6 +54,7 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile.e2e
+    image: orchestream-e2e-backend
     ports:
       - "${BACKEND_PORT:-3001}:3001"
     environment:
@@ -81,6 +82,7 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile.e2e
+    image: orchestream-e2e-frontend
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
     environment:
@@ -94,6 +96,7 @@ services:
     build:
       context: .
       dockerfile: worker/Dockerfile.e2e
+    image: orchestream-e2e-worker
     environment:
       DATABASE_URL: postgres://orchestream_ai:orchestream_ai@postgres-e2e:5432/orchestream_ai
       VALKEY_HOST: valkey-e2e
@@ -115,18 +118,19 @@ services:
     build:
       context: .
       dockerfile: sidecar/Dockerfile.e2e
+    image: orchestream-e2e-sidecar
     environment:
       SIDECAR_TOKEN: e2e-sidecar-token
     ports:
       - "127.0.0.1:${SIDECAR_PORT:-4001}:4001"
-    tmpfs: /var/flow-data
-    cap_add:
-      - SYS_ADMIN
+    tmpfs:
+      - /var/flow-data:uid=1001,gid=0,mode=700
 
   mock-llm-e2e:
     build:
       context: ./test/mock-llm
       dockerfile: Dockerfile
+    image: orchestream-e2e-mock-llm
     ports:
       - "${MOCK_LLM_PORT:-3002}:3002"
 
@@ -134,6 +138,7 @@ services:
     build:
       context: ./test/mock-mcp
       dockerfile: Dockerfile
+    image: orchestream-e2e-mock-mcp
     ports:
       - "${MOCK_MCP_PORT:-3003}:3003"
 
@@ -141,6 +146,7 @@ services:
     build:
       context: ./test/mock-oidc
       dockerfile: Dockerfile
+    image: orchestream-e2e-mock-oidc
     ports:
       - "${MOCK_OIDC_PORT:-3004}:3004"
 
@@ -148,5 +154,6 @@ services:
     build:
       context: ./test/mock-cyberark
       dockerfile: Dockerfile
+    image: orchestream-e2e-mock-cyberark
     ports:
       - "${MOCK_CYBERARK_PORT:-3005}:3005"

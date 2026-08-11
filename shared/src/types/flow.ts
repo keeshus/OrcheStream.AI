@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ThinkingMode } from './thinking.js';
 
 // ── Node type enum ──────────────────────────────────────────
 
@@ -61,6 +62,7 @@ export interface LLMAgentNodeData extends BaseNodeData {
     outputSchema?: string;
     inputFields?: string[];
     contextIds?: string[];
+    thinkingMode?: ThinkingMode;
   };
 }
 
@@ -212,6 +214,7 @@ export interface AIActionNodeData extends BaseNodeData {
     responseFormat?: 'text' | 'json_object';
     outputSchema?: string;
     inputFields?: string[];
+    thinkingMode?: ThinkingMode;
   };
 }
 

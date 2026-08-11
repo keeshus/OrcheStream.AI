@@ -5,6 +5,8 @@ import { API_URL } from '@/lib/api-client';
 import Link from 'next/link';
 import { Icon } from '@/components/ui/Icon';
 import { TextField } from '@/components/ui/TextField';
+import { BrandLogo } from '@/components/BrandLogo';
+import { BetaBadge } from '@/components/BetaBadge';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -43,8 +45,12 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen bg-surface-container flex items-center justify-center">
       <div className="max-w-md w-full mx-4">
+        <div className="flex items-center justify-center gap-4 mb-8">
+          <BrandLogo size="lg" />
+          <div className="text-3xl font-bold text-on-surface">OrcheStream.AI <BetaBadge /></div>
+        </div>
         <div className="bg-surface rounded-xl shadow-sm border p-8">
-          <h1 className="text-2xl font-bold text-on-surface mb-6">Sign In</h1>
+          <h2 className="text-xl font-semibold text-on-surface mb-4">Sign In</h2>
           {error && <div className="bg-error-container border border-red-200 text-red-700 text-sm rounded p-3 mb-4">{error}</div>}
 
           {hasSso && (

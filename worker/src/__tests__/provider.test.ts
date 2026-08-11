@@ -114,6 +114,135 @@ describe('callLLMGeneric', () => {
       );
     });
 
+    it('pins a high max_tokens so providers do not truncate long outputs', async () => {
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'ok', tool_calls: undefined } }],
+      });
+      mockOpenAI({ chat: { completions: { create: mockCreate } } });
+
+      await callLLMGeneric(baseParams, 'openai');
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ max_tokens: 32000 }),
+      );
+    });
+
+    it('surfaces finish_reason from a non-streaming response', async () => {
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'cut off', tool_calls: undefined }, finish_reason: 'length' }],
+      });
+      mockOpenAI({ chat: { completions: { create: mockCreate } } });
+
+      const result = await callLLMGeneric(baseParams, 'openai');
+      expect(result.finishReason).toBe('length');
+    });
+
+    it('omits thinking params by default', async () => {
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'ok', tool_calls: undefined } }],
+      });
+      mockOpenAI({ chat: { completions: { create: mockCreate } } });
+
+      await callLLMGeneric(baseParams, 'openai');
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.not.objectContaining({ reasoning_effort: expect.anything(), thinking: expect.anything() }),
+      );
+    });
+
+    it('sends reasoning_effort for standard OpenAI (o-series) effort levels', async () => {
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'ok', tool_calls: undefined } }],
+      });
+      mockOpenAI({ chat: { completions: { create: mockCreate } } });
+
+      for (const effort of ['low', 'medium', 'high']) {
+        mockCreate.mockClear();
+        await callLLMGeneric({ ...baseParams, thinkingMode: effort as any }, 'openai');
+        expect(mockCreate).toHaveBeenCalledWith(
+          expect.objectContaining({ reasoning_effort: effort }),
+        );
+        expect(mockCreate).toHaveBeenCalledWith(
+          expect.not.objectContaining({ thinking: expect.anything() }),
+        );
+      }
+    });
+
+    it('sends thinking disabled for DeepSeek endpoints', async () => {
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'ok', tool_calls: undefined } }],
+      });
+      mockOpenAI({ chat: { completions: { create: mockCreate } } });
+
+      const deepseekParams = { ...baseParams, baseUrl: 'https://api.deepseek.com' };
+      await callLLMGeneric({ ...deepseekParams, thinkingMode: 'disabled' }, 'openai');
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ thinking: { type: 'disabled' } }),
+      );
+    });
+
+    it('sends thinking enabled plus reasoning_effort for DeepSeek effort levels', async () => {
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'ok', tool_calls: undefined } }],
+      });
+      mockOpenAI({ chat: { completions: { create: mockCreate } } });
+
+      const deepseekParams = { ...baseParams, baseUrl: 'https://api.deepseek.com' };
+      for (const effort of ['low', 'high', 'xhigh', 'max']) {
+        mockCreate.mockClear();
+        await callLLMGeneric({ ...deepseekParams, thinkingMode: effort as any }, 'openai');
+        expect(mockCreate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            reasoning_effort: effort,
+            thinking: { type: 'enabled' },
+          }),
+        );
+      }
+    });
+
+    it('echoes reasoning_content back for DeepSeek when a thinking payload is attached', async () => {
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'ok', tool_calls: undefined } }],
+      });
+      mockOpenAI({ chat: { completions: { create: mockCreate } } });
+
+      const deepseekParams = { ...baseParams, baseUrl: 'https://api.deepseek.com' };
+      await callLLMGeneric({
+        ...deepseekParams,
+        messages: [{ role: 'assistant', content: 'let me check', thinking: { content: 'I need to call a tool' } }],
+      }, 'openai');
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: expect.arrayContaining([
+            expect.objectContaining({ role: 'assistant', content: 'let me check', reasoning_content: 'I need to call a tool' }),
+          ]),
+        }),
+      );
+    });
+
+    it('does not echo reasoning back for non-DeepSeek endpoints', async () => {
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'ok', tool_calls: undefined } }],
+      });
+      mockOpenAI({ chat: { completions: { create: mockCreate } } });
+
+      await callLLMGeneric({
+        ...baseParams,
+        messages: [{ role: 'assistant', content: 'let me check', thinking: { content: 'secret chain of thought' } }],
+      }, 'openai');
+      const args = mockCreate.mock.calls[0][0] as any;
+      expect(JSON.stringify(args)).not.toContain('reasoning_content');
+    });
+
+    it('returns reasoning payload from a non-streaming response', async () => {
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'Final answer', reasoning_content: 'Let me think...', tool_calls: undefined } }],
+      });
+      mockOpenAI({ chat: { completions: { create: mockCreate } } });
+
+      const result = await callLLMGeneric(baseParams, 'openai');
+      expect(result.text).toBe('Final answer');
+      expect(result.reasoning?.content).toBe('Let me think...');
+    });
+
     it('returns text response without system prompt', async () => {
       const mockCreate = vi.fn().mockResolvedValue({
         choices: [{ message: { content: 'no system prompt', tool_calls: undefined } }],
@@ -158,6 +287,20 @@ describe('callLLMGeneric', () => {
       expect(onToken).toHaveBeenCalledTimes(2);
     });
 
+    it('accumulates reasoning_content from streaming chunks', async () => {
+      async function* generate() {
+        yield { choices: [{ delta: { reasoning_content: 'Let me' } }] };
+        yield { choices: [{ delta: { reasoning_content: ' think...' } }] };
+        yield { choices: [{ delta: { content: 'Done' } }] };
+      }
+      const mockCreate = vi.fn().mockResolvedValue(generate());
+      mockOpenAI({ chat: { completions: { create: mockCreate } } });
+
+      const result = await callLLMGeneric({ ...baseParams, onToken: vi.fn() }, 'openai');
+      expect(result.text).toBe('Done');
+      expect(result.reasoning?.content).toBe('Let me think...');
+    });
+
     it('accumulates tool calls from streaming chunks', async () => {
       const tc1 = { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'get_weather', arguments: '' } }] } }] };
       const tc2 = { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"city":"' } }] } }] };
@@ -185,6 +328,19 @@ describe('callLLMGeneric', () => {
 
       const result = await callLLMGeneric({ ...baseParams, onToken: vi.fn() }, 'openai');
       expect(result.toolCalls![0].input).toEqual({});
+    });
+
+    it('surfaces finish_reason from streaming chunks', async () => {
+      async function* generate() {
+        yield { choices: [{ delta: { content: 'partial answer' } }] };
+        yield { choices: [{ delta: {}, finish_reason: 'length' }] };
+      }
+      const mockCreate = vi.fn().mockResolvedValue(generate());
+      mockOpenAI({ chat: { completions: { create: mockCreate } } });
+
+      const result = await callLLMGeneric({ ...baseParams, onToken: vi.fn() }, 'openai');
+      expect(result.text).toBe('partial answer');
+      expect(result.finishReason).toBe('length');
     });
   });
 
@@ -243,6 +399,38 @@ describe('callLLMGeneric', () => {
           ]),
         }),
       );
+    });
+
+    it('maps thinking modes to Anthropic reasoning effort', async () => {
+      const mockCreate = vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      mockAnthropic({ messages: { create: mockCreate } });
+
+      await callLLMGeneric({ ...baseParams, thinkingMode: 'disabled' }, 'anthropic');
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ reasoning: { effort: 'none' } }),
+      );
+
+      mockCreate.mockClear();
+      await callLLMGeneric({ ...baseParams, thinkingMode: 'high' }, 'anthropic');
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ reasoning: { effort: 'high' } }),
+      );
+    });
+
+    it('extracts thinking blocks from an Anthropic response', async () => {
+      const mockCreate = vi.fn().mockResolvedValue({
+        content: [
+          { type: 'thinking', thinking: 'Let me reason about this.' },
+          { type: 'text', text: 'Here is the answer.' },
+        ],
+      });
+      mockAnthropic({ messages: { create: mockCreate } });
+
+      const result = await callLLMGeneric(baseParams, 'anthropic');
+      expect(result.text).toBe('Here is the answer.');
+      expect(result.reasoning?.content).toBe('Let me reason about this.');
     });
 
     it('returns text response without system prompt for Anthropic', async () => {

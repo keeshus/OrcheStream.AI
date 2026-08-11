@@ -1,14 +1,17 @@
 import { callLLMGeneric, type ToolDefinition, type LLMResponse } from './provider.js';
+import type { ThinkingMode } from 'orchestream-ai-shared';
+import type { ConversationMessage } from './thinking.js';
 
 export interface LLMCallParams {
   endpointId: string;
   model: string;
   systemPrompt: string;
-  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+  messages: ConversationMessage[];
   temperature: number;
   onToken?: (token: string) => void;
   tools?: ToolDefinition[];
   signal?: AbortSignal;
+  thinkingMode?: ThinkingMode;
 }
 
 export interface ResolvedEndpoint {
@@ -31,6 +34,7 @@ export async function callLLM(params: LLMCallParams, endpoint: ResolvedEndpoint)
       onToken: params.onToken,
       tools: params.tools,
       signal: params.signal,
+      thinkingMode: params.thinkingMode,
     },
     endpoint.providerType,
   );

@@ -28,7 +28,7 @@ describe('Icon', () => {
   });
 
   it('sets fontVariationSettings for fill, weight, grade', () => {
-    render(<Icon name="star" weight="400" grade={200} fill />);
+    render(<Icon name="star" weight={400} grade={200} fill />);
     const el = screen.getByText('star');
     expect(el.getAttribute('style')).toContain('FILL');
     expect(el.getAttribute('style')).toContain('wght');

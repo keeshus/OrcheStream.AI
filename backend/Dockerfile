@@ -25,7 +25,7 @@ RUN npm ci -w shared -w worker -w backend && npm cache clean --force
 # Build shared so the compiled backend can resolve orchestream-ai-shared at runtime
 # (the package main points at src/index.ts, which only tsx can load)
 RUN cd shared && npx -p typescript@7.0.2 tsc && cd .. && \
-    node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('shared/package.json','utf8'));p.main='./dist/index.js';p.types='./dist/index.d.ts';p.exports={'.':{types:'./dist/index.d.ts',default:'./dist/index.js'},'./types':{types:'./dist/types/index.d.ts',default:'./dist/types/index.js'}};fs.writeFileSync('shared/package.json',JSON.stringify(p,null,2))"
+    node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('shared/package.json','utf8'));p.main='./dist/index.js';p.types='./dist/index.d.ts';p.exports={'.':{types:'./dist/index.d.ts',default:'./dist/index.js'},'./types':{types:'./dist/types/index.d.ts',default:'./dist/types/index.js'},'./thinking':{types:'./dist/types/thinking.d.ts',default:'./dist/types/thinking.js'}};fs.writeFileSync('shared/package.json',JSON.stringify(p,null,2))"
 
 # Backend source + build
 COPY backend/tsconfig.build.json ./backend/tsconfig.json

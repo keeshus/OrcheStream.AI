@@ -36,18 +36,11 @@ test.describe('Sidecar lifecycle and execution history', () => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (cookie) headers['Cookie'] = cookie;
 
-    const res = await fetch(`${API_URL}/flows/${flow.id}/execute`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ input: { message: 'hello' }, _debug: false }),
-    });
-    expect(res.ok).toBe(true);
-    const events = await readSSE(res);
-
-    const started = events.find(e => e.type === 'execution.started');
-    expect(started).toBeDefined();
-    const completed = events.find(e => e.type === 'execution.completed');
-    expect(completed).toBeDefined();
+    const { executePersisted, pollExecution } = await import('./helpers/stream');
+    const { executionId } = await executePersisted(flow.id, { message: 'hello' }, cookie);
+    expect(executionId).toBeTruthy();
+    const exec = await pollExecution(request, executionId, 30000);
+    expect(exec.status).toBe('completed');
   });
 
   test('execution history page loads', async ({ page }) => {
@@ -75,22 +68,11 @@ test.describe('Sidecar lifecycle and execution history', () => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (cookie) headers['Cookie'] = cookie;
 
-    const res = await fetch(`${API_URL}/flows/${flow.id}/execute`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ input: { message: 'list-test' }, _debug: false }),
-    });
-    expect(res.ok).toBe(true);
-    const events = await readSSE(res);
-
-    const started = events.find(e => e.type === 'execution.started');
-    expect(started).toBeDefined();
-    const executionId = (started as any)?.executionId as string | undefined;
+    const { executePersisted, pollExecution } = await import('./helpers/stream');
+    const { executionId } = await executePersisted(flow.id, { message: 'list-test' }, cookie);
     expect(executionId).toBeTruthy();
 
-    const execRes = await request.get(`${API_URL}/executions/${executionId}`);
-    expect(execRes.ok()).toBe(true);
-    const execution = await execRes.json();
+    const execution = await pollExecution(request, executionId, 30000);
     expect(execution.flow_name).toBe(flowName);
     expect(execution.status).toBe('completed');
   });
@@ -119,18 +101,11 @@ test.describe('Sidecar lifecycle and execution history', () => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (cookie) headers['Cookie'] = cookie;
 
-    const res = await fetch(`${API_URL}/flows/${flow.id}/execute`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ input: { message: 'test' }, _debug: false }),
-    });
-    expect(res.ok).toBe(true);
-    const events = await readSSE(res);
-
-    const completed = events.find(e => e.type === 'execution.completed');
-    expect(completed).toBeDefined();
-
-    const output = completed?.data?.output || {};
+    const { executePersisted, pollExecution } = await import('./helpers/stream');
+    const { executionId } = await executePersisted(flow.id, { message: 'test' }, cookie);
+    const exec = await pollExecution(request, executionId, 30000);
+    expect(exec.status).toBe('completed');
+    const output = exec.output || {};
     const outputStr = typeof output === 'string' ? output : JSON.stringify(output);
     expect(outputStr).toContain('sandbox-works');
   });
@@ -193,16 +168,8 @@ test.describe('Sidecar lifecycle and execution history', () => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (cookie) headers['Cookie'] = cookie;
 
-    const res = await fetch(`${API_URL}/flows/${flow.id}/execute`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ input: { message: 'detail-test' }, _debug: false }),
-    });
-    expect(res.ok).toBe(true);
-    const events = await readSSE(res);
-    const started = events.find(e => e.type === 'execution.started');
-    expect(started).toBeDefined();
-    const executionId = (started as any)?.executionId as string;
+    const { executePersisted } = await import('./helpers/stream');
+    const { executionId } = await executePersisted(flow.id, { message: 'detail-test' }, cookie);
     expect(executionId).toBeTruthy();
 
     // Run history page → click the execution row → detail view with status + step trace
@@ -272,7 +239,10 @@ test.describe('Sidecar lifecycle and execution history', () => {
     const secondId = await run('run-two');
     expect(secondId).not.toBe(firstId);
 
-    // Both runs are persisted as separate, completed records
+    // Both runs are persisted as separate, completed records (worker executes them)
+    const { pollExecution } = await import('./helpers/stream');
+    await pollExecution(request, firstId, 30000);
+    await pollExecution(request, secondId, 30000);
     const listRes = await request.get(`${API_URL}/flows/${flow.id}/executions`);
     expect(listRes.ok()).toBe(true);
     const { data } = await listRes.json();
@@ -311,25 +281,19 @@ test.describe('Sidecar lifecycle and execution history', () => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (cookie) headers['Cookie'] = cookie;
 
-    const res = await fetch(`${API_URL}/flows/${flow.id}/execute`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ input: { message: 'test' }, _debug: false }),
-    });
-    expect(res.ok).toBe(true);
-    const events = await readSSE(res);
-
-    const failed = events.find(e => e.type === 'execution.failed');
-    expect(failed).toBeDefined();
-    expect(failed?.data?.error).toContain('boom from code node');
-    const started = events.find(e => e.type === 'execution.started');
-    const executionId = (started as any)?.executionId as string;
+    const { executePersisted } = await import('./helpers/stream');
+    const { executionId } = await executePersisted(flow.id, { message: 'test' }, cookie);
     expect(executionId).toBeTruthy();
 
     // Persisted record: status failed, error stored, failed step recorded
-    const execRes = await request.get(`${API_URL}/executions/${executionId}`);
-    expect(execRes.ok()).toBe(true);
-    const exec = await execRes.json();
+    let exec: any = null;
+    for (let i = 0; i < 30; i++) {
+      const execRes = await request.get(`${API_URL}/executions/${executionId}`);
+      expect(execRes.ok()).toBe(true);
+      exec = await execRes.json();
+      if (exec.status !== 'running') break;
+      await new Promise(r => setTimeout(r, 1000));
+    }
     expect(exec.status).toBe('failed');
     expect(exec.error).toContain('boom from code node');
     const failedStep = exec.steps?.find((s: any) => s.node_id === 'c1');

@@ -7,6 +7,7 @@ import { Icon } from '@/components/ui/Icon';
 import { StepCard } from '@/components/flow/StepCard';
 import { useAuth } from '@/lib/auth-context';
 import { Tooltip } from '@/components/ui/Tooltip';
+import { BrandLogo } from '@/components/BrandLogo';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
 
@@ -112,6 +113,10 @@ export default function ExecutionHistoryPage() {
     <div className="min-h-screen bg-surface-container">
       <div className="max-w-4xl mx-auto p-6">
         <div className="flex items-center gap-3 mb-6">
+          <Link href="/" className="flex items-center gap-1.5 shrink-0 leading-none text-on-surface-variant hover:text-on-surface-variant" title="Home">
+            <BrandLogo size="sm" />
+            <span>Home</span>
+          </Link>
           <Link href={backHref} className="flex items-center gap-1 leading-none text-on-surface-variant hover:text-on-surface-variant"><Icon name="arrow_back" className="text-base" /> <span>Back</span></Link>
           <div className="flex-1"><h1 className="text-2xl font-bold text-on-surface">Run history</h1></div>
         </div>
@@ -192,6 +197,10 @@ export default function ExecutionHistoryPage() {
     <div className="min-h-screen bg-surface-container">
       <div className="max-w-4xl mx-auto p-6">
         <div className="flex items-center gap-3 mb-6">
+          <Link href="/" className="flex items-center gap-1.5 shrink-0 leading-none text-on-surface-variant hover:text-on-surface-variant" title="Home">
+            <BrandLogo size="sm" />
+            <span>Home</span>
+          </Link>
           <button onClick={() => { setView('list'); setSelected(null); setSteps([]); }} className="flex items-center gap-1 leading-none text-on-surface-variant hover:text-on-surface-variant"><Icon name="arrow_back" className="text-base" /> <span>Back</span></button>
           <div className="flex-1">
             <div className="flex items-center gap-2">

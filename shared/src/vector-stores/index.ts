@@ -233,6 +233,29 @@ export function listStores(): string[] {
 }
 
 /**
+ * Register the pgvector fallback and load persisted stores from the DB.
+ * Must run in EVERY process that executes flows (backend + worker), otherwise
+ * retriever nodes in worker-executed runs search an empty registry.
+ */
+export async function initVectorStores(db: any): Promise<void> {
+  registerStore('pgvector', createPgvectorStore(db));
+  try {
+    const { vectorStores: vectorStoresTable } = await import('../db/schema.js');
+    const rows = await db.select().from(vectorStoresTable);
+    for (const s of rows) {
+      try {
+        const factory = s.store_type === 'neo4j' ? createNeo4jStore : createQdrantStore;
+        const store = factory(s.url, s.api_key || undefined);
+        registerStore(s.name, store);
+        console.log(`Vector store loaded: ${s.name} (${s.store_type})`);
+      } catch (err) {
+        console.warn(`Failed to load vector store ${s.name}:`, (err as Error).message);
+      }
+    }
+  } catch { /* DB not ready yet */ }
+}
+
+/**
  * Best-effort upsert into every registered store except 'pgvector' (whose
  * data lives in the Postgres embeddings table and is written by the upload
  * routes directly). Failures are logged and swallowed so an unreachable

@@ -7,10 +7,12 @@ import { useConfirm } from '@/lib/useConfirm';
 import Link from 'next/link';
 import { Icon } from '@/components/ui/Icon';
 import { BrandLogo } from '@/components/BrandLogo';
+import { BetaBadge } from '@/components/BetaBadge';
 import { TextField } from '@/components/ui/TextField';
 import { SelectField } from '@/components/ui/SelectField';
 import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { Tooltip } from '@/components/ui/Tooltip';
+import { RunModal } from '@/components/ui/RunModal';
 
 type Tab = 'flows' | 'subflows' | 'contexts';
 
@@ -25,6 +27,7 @@ export default function FlowsListPage() {
   const [sort, setSort] = useState<'updated_at' | 'created_at'>('updated_at');
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState<Record<string, 'running' | 'ok' | 'error' | null>>({});
+  const [runFlow, setRunFlow] = useState<{ id: string; name: string; nodes?: any[] } | null>(null);
   const deleteConfirm = useConfirm({ title: 'Delete flow?', message: 'Are you sure you want to delete this flow? This cannot be undone.' });
   const PAGE_SIZE = 20;
   const router = useRouter();
@@ -118,19 +121,12 @@ export default function FlowsListPage() {
     setFlows(flows.filter(f => f.id !== id));
   };
 
-  const handleRun = async (flowId: string) => {
+  const handleRun = async (flowId: string, input?: Record<string, unknown>) => {
     setRunning((prev) => ({ ...prev, [flowId]: 'running' }));
     try {
-      const flow = flows.find(f => f.id === flowId);
-      const triggerNode = flow?.nodes?.find((n: any) => n.data?.type === 'trigger');
-      const inputMessage = triggerNode?.data?.config?.inputMessage || '';
-      let input: any;
-      try { input = inputMessage ? JSON.parse(inputMessage) : { message: inputMessage || 'Hello!' }; }
-      catch { input = { message: inputMessage || 'Hello!' }; }
-
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 8000);
-      await api.flows.execute(flowId, input, controller.signal);
+      await api.flows.execute(flowId, input ?? {}, controller.signal);
       clearTimeout(timeout);
       setRunning((prev) => ({ ...prev, [flowId]: 'ok' }));
     } catch (err: any) {
@@ -211,7 +207,7 @@ export default function FlowsListPage() {
         <div className="max-w-md mx-auto text-center px-6">
           <div className="flex items-center justify-center gap-4 mb-4">
             <BrandLogo size="lg" />
-            <h1 className="text-3xl font-bold text-on-surface">OrcheStream.AI</h1>
+            <h1 className="text-3xl font-bold text-on-surface">OrcheStream.AI <BetaBadge /></h1>
           </div>
           <p className="text-on-surface-variant mb-8">Visual LLM agent builder. Build, test, and deploy AI workflows with a drag-and-drop editor.</p>
           <div className="space-y-3">
@@ -236,38 +232,40 @@ export default function FlowsListPage() {
           <div className="flex items-center gap-3">
             <BrandLogo size="sm" />
             <div>
-              <h1 className="text-2xl font-bold text-on-surface">OrcheStream.AI</h1>
+              <h1 className="text-2xl font-bold text-on-surface">OrcheStream.AI <BetaBadge /></h1>
               {!isReader && <p className="text-sm text-on-surface-variant mt-0.5">Build and manage your LLM agent workflows</p>}
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             {authLoading ? null : user ? (
               <>
-                <span className="text-xs text-on-surface-variant mr-1">{user.name}</span>
-                <Tooltip content="Profile">
-                  <Link href="/profile" className="flex items-center gap-1 px-2 py-1 text-xs text-on-surface-variant hover:text-primary hover:bg-secondary-container rounded transition-colors">
-                    <Icon name="person" className="text-sm" /> Profile
-                  </Link>
-                </Tooltip>
-                {can('execution:approve') && (
-                  <Tooltip content="All pending approvals">
-                    <Link href="/approvals" className="flex items-center gap-1 px-2 py-1 text-xs text-on-surface-variant hover:text-primary hover:bg-secondary-container rounded transition-colors">
-                      <Icon name="thumb_up" className="text-base" /> Approvals
+                <span className="text-xs text-on-surface-variant">{user.name}</span>
+                <div className="grid grid-cols-2 justify-items-end gap-x-3 gap-y-0.5">
+                  <Tooltip content="Profile">
+                    <Link href="/profile" className="flex items-center gap-1 px-2 py-1 text-xs text-on-surface-variant hover:text-primary hover:bg-secondary-container rounded transition-colors">
+                      <Icon name="person" className="text-sm" /> Profile
                     </Link>
                   </Tooltip>
-                )}
-                {can('admin') && (
-                <Tooltip content="Settings">
-                  <Link href="/settings" className="flex items-center gap-1 px-2 py-1 text-xs text-on-surface-variant hover:text-primary hover:bg-secondary-container rounded transition-colors">
-                    <Icon name="settings" className="text-sm" /> Settings
-                  </Link>
-                </Tooltip>
-                )}
-                <Tooltip content="Sign Out">
-                  <button onClick={handleLogout} className="flex items-center gap-1 p-2 text-xs text-on-surface-variant hover:text-error hover:bg-error-container rounded transition-colors">
-                    <Icon name="logout" className="text-xl" /> Sign Out
-                  </button>
-                </Tooltip>
+                  {can('execution:approve') && (
+                    <Tooltip content="All pending approvals">
+                      <Link href="/approvals" className="flex items-center gap-1 px-2 py-1 text-xs text-on-surface-variant hover:text-primary hover:bg-secondary-container rounded transition-colors">
+                        <Icon name="thumb_up" className="text-base" /> Approvals
+                      </Link>
+                    </Tooltip>
+                  )}
+                  {can('admin') && (
+                    <Tooltip content="Settings">
+                      <Link href="/settings" className="flex items-center gap-1 px-2 py-1 text-xs text-on-surface-variant hover:text-primary hover:bg-secondary-container rounded transition-colors">
+                        <Icon name="settings" className="text-sm" /> Settings
+                      </Link>
+                    </Tooltip>
+                  )}
+                  <Tooltip content="Sign Out">
+                    <button onClick={handleLogout} className="flex items-center gap-1 p-2 text-xs text-on-surface-variant hover:text-error hover:bg-error-container rounded transition-colors">
+                      <Icon name="logout" className="text-xl" /> Sign Out
+                    </button>
+                  </Tooltip>
+                </div>
               </>
             ) : (
               <>
@@ -435,7 +433,7 @@ export default function FlowsListPage() {
                                     </Tooltip>
                                   ) : (
                                     <Tooltip content="Run flow">
-                                      <button onClick={() => handleRun(flow.id)} className="flex items-center gap-1 px-2 py-1 text-xs text-on-surface-variant hover:text-success hover:bg-secondary-container rounded transition-colors cursor-pointer">
+                                      <button onClick={() => setRunFlow(flow)} className="flex items-center gap-1 px-2 py-1 text-xs text-on-surface-variant hover:text-success hover:bg-secondary-container rounded transition-colors cursor-pointer">
                                         <Icon name="play_arrow" className="text-sm" /> Run
                                       </button>
                                     </Tooltip>
@@ -732,6 +730,11 @@ export default function FlowsListPage() {
       </div>
       {deleteConfirm.dialog}
       {contextDeleteConfirm.dialog}
+      <RunModal
+        flow={runFlow}
+        onClose={() => setRunFlow(null)}
+        onRun={(input: Record<string, unknown>) => { if (runFlow) handleRun(runFlow.id, input); }}
+      />
     </div>
   );
 }

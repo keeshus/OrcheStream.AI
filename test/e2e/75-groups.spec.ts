@@ -455,10 +455,10 @@ test.describe('Groups feature', () => {
     await expect(page.getByTestId('node-config-modal')).toBeVisible({ timeout: 5000 });
 
     // Verify the Assignment type section with group option exists
-    await expect(page.getByText('Assignment type')).toBeVisible();
+    await expect(page.getByText('Assignment type', { exact: true })).toBeVisible();
 
     // Click the Assignment type select trigger to open the dropdown
-    const assignTrigger = page.locator('[role="combobox"]').filter({ hasText: /Specific user|Specific group/ }).first();
+    const assignTrigger = page.locator('[role="combobox"]').filter({ hasText: /Select assignment type|Specific user|Specific group/ }).first();
     await assignTrigger.click();
 
     // Verify "Specific group" option appears in the opened dropdown
@@ -976,33 +976,22 @@ async function registerUserClean(email: string, password: string, name: string):
       body: JSON.stringify({ input: {}, _debug: false }),
     });
     expect(execRes.ok).toBe(true);
-    const events: any[] = [];
-    const bodyReader = execRes.body?.getReader();
-    if (bodyReader) {
-      const decoder = new TextDecoder();
-      let buf = '';
-      while (true) {
-        const { done, value } = await bodyReader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split('\n');
-        buf = lines.pop() || '';
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const evt = JSON.parse(line.slice(6));
-              events.push(evt);
-              if (evt.type === 'execution.paused') break;
-            } catch {}
-          }
-        }
-        if (events.some(e => e.type === 'execution.paused')) break;
+    const events = await (await import('./helpers/stream')).readSSE(execRes);
+    const started = events.find((e: any) => e.type === 'execution.started');
+    expect(started).toBeDefined();
+    const executionId = (started as any)?.executionId || started?.data?.executionId || '';
+
+    // Persisted runs pause on the worker — poll until the execution is awaiting approval
+    for (let i = 0; i < 30; i++) {
+      const r = await request.get(`${API_URL}/executions/${executionId}`);
+      if (r.ok()) {
+        const exec = await r.json();
+        if (exec.status === 'awaiting_approval') break;
       }
-      bodyReader.releaseLock();
+      await new Promise(r => setTimeout(r, 1000));
     }
-    const paused = events.find(e => e.type === 'execution.paused');
-    expect(paused).toBeDefined();
-    const executionId = paused?.data?.executionId || paused?.executionId || '';
+    const pausedExec = await (await request.get(`${API_URL}/executions/${executionId}`)).json();
+    expect(pausedExec.status).toBe('awaiting_approval');
 
     // Register a member who is in this group and promote them to editor so
     // they hold execution:approve (the reader role no longer has it)

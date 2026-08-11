@@ -950,25 +950,23 @@ test.describe('All node types', () => {
     });
     const flow = await res.json();
 
-    const { readSSE, pollExecution } = await import('./helpers/stream');
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (cookie) headers['Cookie'] = cookie;
-    const runRes = await fetch(`${API_URL}/flows/${flow.id}/execute`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ input: {}, _debug: false }),
-    });
-    expect(runRes.ok).toBe(true);
-    const events = await readSSE(runRes);
-    const started = events.find(e => e.type === 'execution.started');
-    expect(started).toBeDefined();
-    const executionId = started?.executionId as string;
+    const { executePersisted, pollExecution } = await import('./helpers/stream');
+    const { executionId } = await executePersisted(flow.id, {}, cookie);
     expect(executionId).toBeTruthy();
 
-    // The delay pauses the execution and schedules a delayed resume (~3s)
-    const paused = events.find(e => e.type === 'execution.paused');
-    expect(paused).toBeDefined();
-    expect(paused?.data?.delayMs).toBeGreaterThanOrEqual(2500);
+    // The delay pauses the execution and schedules a delayed resume (~3s) —
+    // visible on the execution record while the worker waits.
+    let delayMs = 0;
+    for (let i = 0; i < 15; i++) {
+      const r = await request.get(`${API_URL}/executions/${executionId}`);
+      if (r.ok()) {
+        const exec = await r.json();
+        delayMs = exec.output?._delayMs || 0;
+        if (delayMs > 0) break;
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+    expect(delayMs).toBeGreaterThanOrEqual(2500);
 
     const start = Date.now();
     const exec = await pollExecution(request, executionId, 30000);

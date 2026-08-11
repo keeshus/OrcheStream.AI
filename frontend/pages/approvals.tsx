@@ -8,6 +8,7 @@ import { TextField } from '@/components/ui/TextField';
 import ReactMarkdown from 'react-markdown';
 import rehypeSanitize from 'rehype-sanitize';
 import { Tooltip } from '@/components/ui/Tooltip';
+import { BrandLogo } from '@/components/BrandLogo';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
 
@@ -118,6 +119,10 @@ export default function ApprovalsPage() {
     <div className="min-h-screen bg-surface-container">
       <div className="max-w-4xl mx-auto p-6">
         <div className="flex items-center gap-3 mb-6">
+          <Link href="/" className="flex items-center gap-1.5 shrink-0 leading-none text-on-surface-variant hover:text-on-surface-variant" title="Home">
+            <BrandLogo size="sm" />
+            <span>Home</span>
+          </Link>
           {!isReader && (
             <Link href="/" className="flex items-center gap-1 leading-none text-on-surface-variant hover:text-on-surface-variant">
               <Icon name="arrow_back" className="text-base" /> <span>Back</span>
@@ -127,20 +132,22 @@ export default function ApprovalsPage() {
             <h1 className="text-2xl font-bold text-on-surface">Pending Approvals</h1>
             <p className="text-sm text-on-surface-variant mt-1">Review and respond to Human-in-the-Loop requests</p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             {user && (
               <>
-                <span className="text-xs text-on-surface-variant mr-1">{user.name}</span>
-                <Tooltip content="Profile">
-                  <Link href="/profile" className="flex items-center gap-1 p-2 text-xs text-on-surface-variant hover:text-primary hover:bg-secondary-container rounded transition-colors">
-                    <Icon name="person" className="text-xl" /> Profile
-                  </Link>
-                </Tooltip>
-                <Tooltip content="Sign Out">
-                  <button onClick={handleLogout} className="flex items-center gap-1 p-2 text-xs text-on-surface-variant hover:text-error hover:bg-error-container rounded transition-colors">
-                    <Icon name="logout" className="text-xl" /> Sign Out
-                  </button>
-                </Tooltip>
+                <span className="text-xs text-on-surface-variant">{user.name}</span>
+                <div className="grid grid-cols-2 justify-items-end gap-x-3">
+                  <Tooltip content="Profile">
+                    <Link href="/profile" className="flex items-center gap-1 p-2 text-xs text-on-surface-variant hover:text-primary hover:bg-secondary-container rounded transition-colors">
+                      <Icon name="person" className="text-xl" /> Profile
+                    </Link>
+                  </Tooltip>
+                  <Tooltip content="Sign Out">
+                    <button onClick={handleLogout} className="flex items-center gap-1 p-2 text-xs text-on-surface-variant hover:text-error hover:bg-error-container rounded transition-colors">
+                      <Icon name="logout" className="text-xl" /> Sign Out
+                    </button>
+                  </Tooltip>
+                </div>
               </>
             )}
           </div>

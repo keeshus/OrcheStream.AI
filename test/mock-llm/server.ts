@@ -98,7 +98,60 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const { model, messages, stream, response_format, tools } = params;
+    const { model, messages, stream, response_format, tools, thinking, reasoning_effort } = params;
+
+    // Capture reasoning pass-back: the reasoning_content the engine echoes back
+    // on the last assistant message (DeepSeek-style thinking-mode requirement).
+    let assistantReasoningPassback: string | undefined;
+    for (const msg of messages || []) {
+      if (msg.role === 'assistant' && typeof msg.reasoning_content === 'string' && msg.reasoning_content) {
+        assistantReasoningPassback = msg.reasoning_content;
+      }
+    }
+
+    // ECHO_PARAMS directive: return a JSON dump of the request's thinking
+    // params so tests can assert what the engine actually sent. Lives in a
+    // system prompt or the latest user message (AI Action sends no system
+    // prompt, so tests put it in the prompt itself).
+    let echoParams = false;
+    for (let i = (messages || []).length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg?.role === 'system' && typeof msg.content === 'string' && msg.content.includes('ECHO_PARAMS')) {
+        echoParams = true;
+      }
+    }
+    const lastMsg = messages?.[messages.length - 1];
+    if (!echoParams && lastMsg?.role === 'user' && typeof lastMsg.content === 'string' && lastMsg.content.includes('ECHO_PARAMS')) {
+      echoParams = true;
+    }
+    if (echoParams) {
+      const paramsDump = JSON.stringify({
+        thinking: thinking ?? null,
+        reasoning_effort: reasoning_effort ?? null,
+        reasoning_passback: assistantReasoningPassback ?? null,
+      });
+      if (stream) {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        res.write(`data: ${JSON.stringify({ id: `mock_${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ id: `mock_${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { content: paramsDump }, finish_reason: 'stop' }] })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
+      jsonResponse(res, 200, {
+        id: `mock_${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: model || 'mock-model',
+        choices: [{ index: 0, message: { role: 'assistant', content: paramsDump }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      });
+      return;
+    }
 
     // Check for MOCK_TOOL_CALL directive in system prompt
     // Only trigger on first call — if conversation already has tool results, return text instead
@@ -131,6 +184,50 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // MOCK_THINKING_TOOL_CALL directive: first call emits reasoning_content +
+    // a tool call; the follow-up call (tool results present) reports whether the
+    // engine passed reasoning_content back on the assistant message.
+    const THINKING_CONTENT = 'Mock chain of thought for thinking test';
+    let thinkingToolCall: string | null = null;
+    let thinkingToolArgs: string = '{}';
+    for (const msg of messages || []) {
+      if (msg.role === 'system' && typeof msg.content === 'string') {
+        const match = msg.content.match(/MOCK_THINKING_TOOL_CALL:\s*(\S+)(?:\s+({.+}))?/);
+        if (match) {
+          thinkingToolCall = match[1];
+          if (match[2]) thinkingToolArgs = match[2];
+        }
+      }
+    }
+    if (thinkingToolCall && hasToolResults) {
+      // Round 2: verify the reasoning pass-back reached this request.
+      toolToCall = null;
+      thinkingToolCall = null;
+      const passback = assistantReasoningPassback || 'MISSING';
+      const mockContent = `THINKING_PASSBACK=${passback}`;
+      if (stream) {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        res.write(`data: ${JSON.stringify({ id: `mock_${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ id: `mock_${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { content: mockContent }, finish_reason: 'stop' }] })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
+      jsonResponse(res, 200, {
+        id: `mock_${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: model || 'mock-model',
+        choices: [{ index: 0, message: { role: 'assistant', content: mockContent }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      });
+      return;
+    }
+
     const mockContent = extractResponse(messages || []);
 
     const responseId = `mock_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -144,7 +241,20 @@ const server = http.createServer(async (req, res) => {
         Connection: 'keep-alive',
       });
 
-      if (toolToCall) {
+      if (thinkingToolCall) {
+        // Stream a tool call response with a reasoning phase first
+        let args: Record<string, unknown> = {};
+        try { args = JSON.parse(thinkingToolArgs); } catch { args = {}; }
+        const argStr = JSON.stringify(args);
+        res.write(`data: ${JSON.stringify({ id: responseId, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ id: responseId, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: THINKING_CONTENT }, finish_reason: null }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ id: responseId, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: `call_${Date.now()}`, type: 'function', function: { name: thinkingToolCall, arguments: '' } }] } }] })}\n\n`);
+        // Stream arguments in chunks
+        for (let i = 0; i < argStr.length; i += 50) {
+          res.write(`data: ${JSON.stringify({ id: responseId, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: argStr.slice(i, i + 50) } }] } }] })}\n\n`);
+        }
+        res.write(`data: ${JSON.stringify({ id: responseId, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
+      } else if (toolToCall) {
         // Stream a tool call response
         let args: Record<string, unknown> = {};
         try { args = JSON.parse(toolArgs); } catch { args = {}; }
@@ -162,7 +272,7 @@ const server = http.createServer(async (req, res) => {
         res.write(`data: ${JSON.stringify({ id: responseId, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
         for (const token of tokens) {
           res.write(`data: ${JSON.stringify({ id: responseId, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: token }, finish_reason: null }] })}\n\n`);
-          await new Promise(r => setTimeout(r, 5));
+          await new Promise(r => setTimeout(r, 2));
         }
         res.write(`data: ${JSON.stringify({ id: responseId, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
       }
@@ -185,7 +295,22 @@ const server = http.createServer(async (req, res) => {
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
     };
 
-    if (toolToCall) {
+    if (thinkingToolCall) {
+      // Return a tool call with a reasoning phase instead of text
+      let args: Record<string, unknown> = {};
+      try { args = JSON.parse(thinkingToolArgs); } catch { args = {}; }
+      response.choices[0].message.content = null;
+      response.choices[0].message.reasoning_content = THINKING_CONTENT;
+      response.choices[0].message.tool_calls = [{
+        index: 0,
+        id: `call_${Date.now()}`,
+        type: 'function',
+        function: {
+          name: thinkingToolCall,
+          arguments: JSON.stringify(args),
+        },
+      }];
+    } else if (toolToCall) {
       // Return a tool call instead of text
       let args: Record<string, unknown> = {};
       try { args = JSON.parse(toolArgs); } catch { args = {}; }

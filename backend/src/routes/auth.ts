@@ -584,6 +584,7 @@ router.get('/me', authenticate, asyncHandler(async (req, res) => {
     user: {
       userId,
       email: req.user?.email,
+      name: updatedUser?.name ?? req.user?.email ?? '',
       role: roleName,
       permissions,
       groups: userGroups,

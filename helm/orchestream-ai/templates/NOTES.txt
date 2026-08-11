@@ -7,13 +7,13 @@ Access the app at:
 {{- end }}
 {{- else }}
 Access the frontend locally:
-  kubectl port-forward svc/{{ include "core-agents.fullname" . }}-frontend {{ .Values.frontend.port }}:{{ .Values.frontend.port }}
+  kubectl port-forward svc/{{ include "orchestream-ai.fullname" . }}-frontend {{ .Values.frontend.port }}:{{ .Values.frontend.port }}
 
 Then open http://localhost:{{ .Values.frontend.port }}
 {{- end }}
 
 Backend health check:
-  kubectl exec deploy/{{ include "core-agents.fullname" . }}-backend -- curl -s http://localhost:{{ .Values.backend.port }}/api/health
+  kubectl exec deploy/{{ include "orchestream-ai.fullname" . }}-backend -- curl -s http://localhost:{{ .Values.backend.port }}/api/health
 
 Database migrations run automatically via an init container on the backend pod.
 

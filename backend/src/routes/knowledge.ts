@@ -4,7 +4,7 @@ import { db } from '../db/connection.js';
 import { documents, embeddings, llmEndpoints } from '../db/schema.js';
 import { requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/async-handler.js';
-import { upsertToRegisteredStores } from '../vector-stores/index.js';
+import { upsertToRegisteredStores } from 'orchestream-ai-shared';
 
 const router = Router();
 

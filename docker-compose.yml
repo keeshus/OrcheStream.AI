@@ -47,9 +47,10 @@ services:
       context: .
       dockerfile: sidecar/Dockerfile
     container_name: orchestream-ai-sidecar
-    tmpfs: /var/flow-data
-    cap_add:
-      - SYS_ADMIN
+    # The sidecar image runs as UID 1001 — the tmpfs must be owned by it or
+    # sandbox setup fails with EACCES.
+    tmpfs:
+      - /var/flow-data:uid=1001,gid=0,mode=700
     ports:
       - "127.0.0.1:4001:4001"
     environment:

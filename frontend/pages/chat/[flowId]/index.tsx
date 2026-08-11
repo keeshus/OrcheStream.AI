@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { Icon } from '@/components/ui/Icon';
 import { useAssistantContext } from '@/hooks/useAssistantContext';
 import { useConfirm } from '@/lib/useConfirm';
+import { BrandLogo } from '@/components/BrandLogo';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
 
@@ -43,6 +44,10 @@ export default function ChatSessionList() {
     <div className="min-h-screen bg-surface-container">
       <div className="max-w-4xl mx-auto p-6">
         <div className="flex items-center gap-3 mb-6">
+          <Link href="/" className="flex items-center gap-1.5 shrink-0 leading-none text-on-surface-variant hover:text-on-surface-variant" title="Home">
+            <BrandLogo size="sm" />
+            <span>Home</span>
+          </Link>
           <Link href="/flows" className="flex items-center gap-1 leading-none text-on-surface-variant hover:text-on-surface-variant">
             <Icon name="arrow_back" className="text-base" /> <span>Back</span>
           </Link>

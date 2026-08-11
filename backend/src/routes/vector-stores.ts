@@ -5,7 +5,10 @@ import { vectorStores, groupMembers } from '../db/schema.js';
 import { requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/async-handler.js';
 import neo4j from 'neo4j-driver';
-import { registerStore, unregisterStore, createQdrantStore, createNeo4jStore, createPgvectorStore } from '../vector-stores/index.js';
+// Initialize pgvector fallback + load persisted stores (also done in the worker
+// so retriever nodes work in worker-executed runs).
+import { registerStore, unregisterStore, createQdrantStore, createNeo4jStore, initVectorStores } from 'orchestream-ai-shared';
+initVectorStores(db).catch(() => {});
 
 const router = Router();
 
@@ -23,24 +26,7 @@ async function checkGroupAdmin(userId: string, groupId: string): Promise<boolean
 
 // Initialize pgvector fallback: searches the Postgres embeddings table that
 // document uploads write to (previously misregistered as a Qdrant client).
-registerStore('pgvector', createPgvectorStore(db));
-
-// Load persisted stores on startup
-(async () => {
-  try {
-    const stores = await db.select().from(vectorStores);
-    for (const s of stores) {
-      try {
-        const factory = s.store_type === 'neo4j' ? createNeo4jStore : createQdrantStore;
-        const store = factory(s.url, s.api_key || undefined);
-        registerStore(s.name, store);
-        console.log(`Vector store loaded: ${s.name} (${s.store_type})`);
-      } catch (err) {
-        console.warn(`Failed to load vector store ${s.name}:`, (err as Error).message);
-      }
-    }
-  } catch { /* DB not ready yet */ }
-})();
+initVectorStores(db).catch(() => {});
 
 // GET /api/vector-stores/:id/collections — list collections
 import { QdrantClient } from '@qdrant/js-client-rest';

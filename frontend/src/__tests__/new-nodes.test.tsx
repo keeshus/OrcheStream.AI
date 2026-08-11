@@ -128,10 +128,10 @@ describe('AIActionNode display logic', () => {
   });
 
   it('detects empty state when no model or prompt', () => {
-    const isEmpty = !('claude-3' || 'test prompt');
-    const hasModel = !!(null || '');
-    expect(isEmpty).toBe(false);
-    expect(hasModel).toBe(false);
+    const isEmpty = (model?: string, prompt?: string) => !model && !prompt;
+    expect(isEmpty(undefined, undefined)).toBe(true);
+    expect(isEmpty('claude-3', 'test prompt')).toBe(false);
+    expect(isEmpty('claude-3', undefined)).toBe(false);
   });
 });
 
@@ -193,8 +193,10 @@ describe('NoteNode display logic', () => {
   });
 
   it('shows empty state when no content', () => {
-    const isEmpty = !('' || null);
-    expect(isEmpty).toBe(true);
+    const isEmpty = (content: string | null | undefined) => !content;
+    expect(isEmpty(null)).toBe(true);
+    expect(isEmpty('')).toBe(true);
+    expect(isEmpty('a'.repeat(100))).toBe(false);
   });
 
   it('has sticky_note_2 icon', () => {

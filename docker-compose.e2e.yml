@@ -123,9 +123,8 @@ services:
       context: .
       dockerfile: sidecar/Dockerfile.e2e
     container_name: orchestream-ai-e2e-sidecar
-    tmpfs: /var/flow-data
-    cap_add:
-      - SYS_ADMIN
+    tmpfs:
+      - /var/flow-data:uid=1001,gid=0,mode=700
     environment:
       SIDECAR_TOKEN: e2e-sidecar-token
     ports:

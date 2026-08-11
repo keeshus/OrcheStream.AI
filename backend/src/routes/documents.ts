@@ -3,7 +3,7 @@ import { db } from '../db/connection.js';
 import { documents, embeddings } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { requirePermission } from '../middleware/auth.js';
-import { upsertToRegisteredStores } from '../vector-stores/index.js';
+import { upsertToRegisteredStores } from 'orchestream-ai-shared';
 // Inline embedding call to avoid cross-workspace TS rootDir issues.
 // At runtime, tsx resolves this fine; the worker module is available.
 async function generateEmbedding(text: string): Promise<number[]> {

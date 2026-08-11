@@ -301,7 +301,7 @@ describe('fieldsToLines', () => {
 
   it('wraps fields in braces', () => {
     const result = fieldsToLines([{ name: 'x', type: 'string', required: true }]);
-    expect(result).toMatch(/^{.*}$/s);
+    expect(result).toMatch(/^\{[\s\S]*\}$/);
   });
 });
 

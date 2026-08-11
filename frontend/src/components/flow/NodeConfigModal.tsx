@@ -5,6 +5,7 @@ import { TextField } from '@/components/ui/TextField';
 import { SelectField } from '@/components/ui/SelectField';
 import { getUpstreamNodeIds, getNodeFields } from '@/components/flow/config/InputPreview';
 import { LLMAgentConfig } from '@/components/flow/config/LLMAgentConfig';
+import { AIActionConfig } from '@/components/flow/config/AIActionConfig';
 import { MCPToolConfig } from '@/components/flow/config/MCPToolConfig';
 import { FlowToolConfig } from '@/components/flow/config/FlowToolConfig';
 import { RetrieverConfig } from '@/components/flow/config/RetrieverConfig';
@@ -513,11 +514,7 @@ export function NodeConfigModal({
           )}
 
           {node.data.type === 'ai-action' && (
-            <div className="space-y-3">
-              <p className="text-xs text-on-surface-variant">
-                Single LLM call — no tool loop, no context layering. Configure a prompt to transform upstream data.
-              </p>
-            </div>
+            <AIActionConfig config={node.data.config} onChange={onConfigChange} />
           )}
 
           {node.data.type === 'http' && (

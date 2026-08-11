@@ -29,6 +29,42 @@ const HTTP_MAX_REDIRECTS = 5;
 // tools or the run is aborted.
 const TOOL_LOOP_CHECK_INTERVAL = 5;
 
+// When a provider response is truncated by the output token limit
+// (finish_reason 'length'), ask the model to continue. Guarded so a model
+// that keeps truncating cannot spin the loop forever.
+const MAX_TRUNCATED_CONTINUATIONS = 3;
+
+// When the conversation exceeds the provider's context window, drop the
+// oldest tool rounds and retry. Guarded the same way as truncation.
+const MAX_CONVERSATION_TRIMS = 3;
+
+// User turn sent to LLM Agents. The engine NEVER derives user content from
+// flow input — the system prompt (with {{input.…}} variables) is the only
+// channel for input. Some providers (e.g. Anthropic) require an alternating
+// user turn, so a fixed neutral placeholder is sent instead of nothing.
+const LLM_AGENT_NO_MESSAGE_PLACEHOLDER = 'Proceed.';
+
+// Matches provider context-window overflow errors (OpenAI/DeepSeek/Anthropic).
+const CONTEXT_OVERFLOW_PATTERN = /context length|context_length|context window|maximum.*context|token.*exceed|exceed.*token|too long|prompt is too large|request too large|context_limit/i;
+
+/** True when the error message indicates the conversation exceeded the model's context window. */
+function isContextOverflowError(message: string): boolean {
+  return CONTEXT_OVERFLOW_PATTERN.test(message);
+}
+
+/**
+ * Best-effort conversation compaction for context overflow: keep the initial
+ * messages (system prompt + user request) and the most recent rounds, drop the
+ * middle tool rounds. Returns true if anything was removed.
+ */
+function trimConversation(conversation: Array<{ role: string; content: string }>, keepInitial: number, keepRecent: number): boolean {
+  if (conversation.length <= keepInitial + keepRecent) return false;
+  const head = conversation.slice(0, keepInitial);
+  const tail = conversation.slice(conversation.length - keepRecent);
+  conversation.splice(0, conversation.length, ...head, ...tail);
+  return true;
+}
+
 // Cap on items a single loop node may iterate — override via MAX_LOOP_ITEMS env
 const MAX_LOOP_ITEMS = (() => {
   const raw = parseInt(process.env.MAX_LOOP_ITEMS ?? '1000', 10);
@@ -196,6 +232,64 @@ export interface ExecutionContext {
   logSecretAccess?: (entry: { name: string; action: string; source: string }) => void;
   sandboxEnv?: Record<string, string>;  // env vars for the sandbox (merged from secrets, CyberArk)
   sandboxExecutionId?: string;          // execution ID for sandbox communication
+}
+
+/**
+ * Assemble the final injected LLM Agent system prompt: layered contexts
+ * (global → group → flow → agent contexts → node prompt with templates
+ * resolved) plus the sandbox environment notes and structured-output
+ * instruction. Shared between the actual LLM call and the step record so
+ * debug runs and run history show exactly what was sent.
+ */
+async function buildInjectedPrompt(
+  config: any,
+  input: Record<string, unknown>,
+  flow: FlowDefinition | undefined,
+  context: ExecutionContext,
+): Promise<string> {
+  const contextLayers: string[] = [];
+
+  // 1. Global context
+  if (context.getGlobalContext) {
+    const globalCtx = await context.getGlobalContext();
+    if (globalCtx) contextLayers.push(globalCtx);
+  }
+
+  // 2. Group context (from flow's group_id)
+  if (context.getGroupContext && flow?.groupId) {
+    const groupCtx = await context.getGroupContext(flow.groupId);
+    if (groupCtx) contextLayers.push(groupCtx);
+  }
+
+  // 3. Flow context
+  if (flow?.flowContext) {
+    contextLayers.push(flow.flowContext);
+  }
+
+  // 4. Selected agent contexts
+  const contextIds = config?.contextIds as string[] | undefined;
+  if (context.getAgentContexts && contextIds?.length) {
+    const agentCtxs = await context.getAgentContexts(contextIds);
+    for (const ac of agentCtxs) {
+      if (ac.content) contextLayers.push(`${ac.title}:\n${ac.content}`);
+    }
+  }
+
+  // 5. Node system prompt (with template + secret resolution)
+  const resolvedNodePrompt = await resolveTemplate(config.systemPrompt || '', input, context);
+  if (resolvedNodePrompt) contextLayers.push(resolvedNodePrompt);
+
+  let resolvedPrompt = contextLayers.join('\n\n---\n\n');
+
+  // Append sandbox environment info — the bash tool is always injected
+  resolvedPrompt += (resolvedPrompt ? '\n\n' : '') + BASH_SANDBOX_SYSTEM_PROMPT;
+
+  // Tell the LLM to use the structured_output tool when JSON output is selected
+  if (config.responseFormat === 'json_object') {
+    resolvedPrompt += (resolvedPrompt ? '\n\n' : '') + 'You must use the structured_output tool to respond — call it with your structured data. Do not output plain text.';
+  }
+
+  return resolvedPrompt;
 }
 
 export class FlowExecutor {
@@ -442,9 +536,24 @@ export class FlowExecutor {
       };
       if (node.data.type === 'llm-agent') {
         const cfg = (node.data as any).config || {};
-        if (cfg.systemPrompt) enrichedInput.systemPrompt = cfg.systemPrompt;
         if (cfg.model) enrichedInput.model = cfg.model;
         if (cfg.temperature !== undefined) enrichedInput.temperature = cfg.temperature;
+        // Record the fully injected prompt (context layers + resolved
+        // templates + sandbox notes) so debug/history shows what was sent.
+        try {
+          enrichedInput.systemPrompt = await buildInjectedPrompt(cfg, filteredInput as Record<string, unknown>, flow, context);
+        } catch {
+          if (cfg.systemPrompt) enrichedInput.systemPrompt = cfg.systemPrompt;
+        }
+      }
+
+      if (node.data.type === 'ai-action') {
+        const cfg = (node.data as any).config || {};
+        try {
+          enrichedInput.prompt = await resolveTemplate(cfg.prompt || '', filteredInput, context);
+        } catch {
+          if (cfg.prompt) enrichedInput.prompt = cfg.prompt;
+        }
       }
 
       if (node.data.type === 'condition') {
@@ -756,24 +865,15 @@ export class FlowExecutor {
           throw new Error(`LLM Agent: endpoint ${config.endpointId} not found`);
         }
 
-        // Extract message from input — supports both flat {message, history}
-        // and chat_input-wrapped {chat_input: {message, history}} formats
-        const inputObj = input as Record<string, unknown> | undefined;
-        const chatInput = inputObj?.chat_input as Record<string, unknown> | undefined;
-        const userMessage = typeof inputObj?.message === 'string'
-          ? inputObj.message
-          : typeof chatInput?.message === 'string'
-            ? chatInput.message
-            : typeof inputObj === 'string'
-              ? inputObj
-              : JSON.stringify(inputObj);
-
-        const history: Array<{ role: 'user' | 'assistant'; content: string }> =
-          Array.isArray(inputObj?.history) ? inputObj.history as any[]
-          : Array.isArray(chatInput?.history) ? chatInput.history as any[]
-          : [];
-
-        const messages = [...history, { role: 'user' as const, content: userMessage }];
+        // Prompt-only contract: the LLM receives ONLY the system prompt.
+        // No input-derived user message is ever constructed — flow authors
+        // reference input explicitly via {{input.…}} variables in the prompt.
+        // History is likewise never auto-appended; authors render it with
+        // {{input.history}} when they want it. A fixed neutral user turn is
+        // sent because some providers (Anthropic) require one.
+        const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [
+          { role: 'user', content: LLM_AGENT_NO_MESSAGE_PLACEHOLDER },
+        ];
 
         // Collect tool definitions from MCP Tool nodes connected via tool-input handles
         const toolDefs: Array<{ name: string; description: string; input_schema: Record<string, unknown> }> = [];
@@ -874,47 +974,11 @@ export class FlowExecutor {
         let finalContent = '';
 
         // Build layered system prompt: global → group → flow → agent contexts → node system prompt
-        const contextLayers: string[] = [];
-
-        // 1. Global context
-        if (context.getGlobalContext) {
-          const globalCtx = await context.getGlobalContext();
-          if (globalCtx) contextLayers.push(globalCtx);
-        }
-
-        // 2. Group context (from flow's group_id)
-        if (context.getGroupContext && flow?.groupId) {
-          const groupCtx = await context.getGroupContext(flow.groupId);
-          if (groupCtx) contextLayers.push(groupCtx);
-        }
-
-        // 3. Flow context
-        if (flow?.flowContext) {
-          contextLayers.push(flow.flowContext);
-        }
-
-        // 4. Selected agent contexts
-        const contextIds = config?.contextIds as string[] | undefined;
-        if (context.getAgentContexts && contextIds?.length) {
-          const agentCtxs = await context.getAgentContexts(contextIds);
-          for (const ac of agentCtxs) {
-            if (ac.content) contextLayers.push(`${ac.title}:\n${ac.content}`);
-          }
-        }
-
-        // 5. Node system prompt (with template + secret resolution)
-        const resolvedNodePrompt = await resolveTemplate(config.systemPrompt || '', input, context);
-        if (resolvedNodePrompt) contextLayers.push(resolvedNodePrompt);
-
-        let resolvedPrompt = contextLayers.join('\n\n---\n\n');
+        // (shared with the step record so the injected prompt is visible in debug/history)
+        const resolvedPrompt = await buildInjectedPrompt(config, input as Record<string, unknown>, flow, context);
 
         // Inject structured output tool when JSON output is selected
         const allTools = [...(toolDefs || [])];
-
-        // Append sandbox environment info to the system prompt if bash tool is available
-        if (allTools.some(t => t.name === 'bash')) {
-          resolvedPrompt += (resolvedPrompt ? '\n\n' : '') + BASH_SANDBOX_SYSTEM_PROMPT;
-        }
         let structuredOutputUsed = false;
         if (config.responseFormat === 'json_object') {
           const outputDesc = 'Call this tool to output structured data. Use it to respond — do not output text, only call this tool.';
@@ -927,15 +991,20 @@ export class FlowExecutor {
             allTools.push({ name: 'structured_output', description: outputDesc, input_schema: { type: 'object', properties: {}, additionalProperties: true } as any });
           }
         }
-        // Tell the LLM to use the structured_output tool when JSON output is selected
-        if (allTools.some(t => t.name === 'structured_output')) {
-          resolvedPrompt += (resolvedPrompt ? '\n\n' : '') + 'You must use the structured_output tool to respond — call it with your structured data. Do not output plain text.';
-        }
 
         // Track all tool calls for the execution log
         const executedTools: Array<{ name: string; input: any; result: string }> = [];
         const result: Record<string, unknown> = { content: '' };
         let consecutiveLlmFailures = 0;
+        // Truncation recovery state: a response cut by the output token limit
+        // ('length') is not a final answer — keep the partial text, tell the
+        // model to continue, and loop. Truncated text accumulates so the final
+        // output never loses the earlier part.
+        let truncatedContinuations = 0;
+        let pendingPartial = '';
+        // Context-window recovery state: trim oldest rounds on overflow errors.
+        let conversationTrims = 0;
+        const initialMessageCount = conversation.length;
 
         for (let round = 0; ; round++) {
           if (this.abortController.signal.aborted) break;
@@ -952,6 +1021,7 @@ export class FlowExecutor {
                 onToken,
                 tools: allTools.length > 0 ? allTools : undefined,
                 signal: this.abortController.signal,
+                thinkingMode: config.thinkingMode,
               },
               endpoint,
             );
@@ -961,12 +1031,30 @@ export class FlowExecutor {
             // what happened so it can wrap up or retry. Two consecutive
             // failures fail the node instead of retrying forever.
             consecutiveLlmFailures++;
+            const errMsg = err instanceof Error ? err.message : String(err);
+
+            // Context window exceeded: the model can never answer if the
+            // conversation does not fit. Trim the oldest tool rounds and retry
+            // before resorting to failure.
+            if (isContextOverflowError(errMsg) && conversationTrims < MAX_CONVERSATION_TRIMS) {
+              const trimmed = trimConversation(conversation, initialMessageCount, 8);
+              conversationTrims++;
+              if (trimmed) {
+                consecutiveLlmFailures = 0;
+                conversation.push({
+                  role: 'user' as const,
+                  content: 'Note: the conversation exceeded the context window and older tool results were trimmed. Continue with the remaining context.',
+                });
+                continue;
+              }
+            }
+
             const failMsg = config.responseFormat === 'json_object'
-              ? `The LLM API call failed: ${err instanceof Error ? err.message : String(err)}. If you have enough information, call structured_output with your final answer now. Otherwise retry your next action.`
-              : `The LLM API call failed: ${err instanceof Error ? err.message : String(err)}. If you have enough information, provide your final summary now and stop. Otherwise retry your next action.`;
+              ? `The LLM API call failed: ${errMsg}. If you have enough information, call structured_output with your final answer now. Otherwise retry your next action.`
+              : `The LLM API call failed: ${errMsg}. If you have enough information, provide your final summary now and stop. Otherwise retry your next action.`;
             conversation.push({ role: 'user' as const, content: failMsg });
             if (consecutiveLlmFailures >= 2) {
-              throw new Error(`LLM API call failed repeatedly: ${err instanceof Error ? err.message : String(err)}`);
+              throw new Error(`LLM API call failed repeatedly: ${errMsg}`);
             }
             continue;
           }
@@ -974,14 +1062,35 @@ export class FlowExecutor {
           if (this.abortController.signal.aborted) break;
 
           if (response.text) {
-            finalContent = response.text;
+            finalContent = pendingPartial + response.text;
           }
 
-          // If no tool calls, we're done
-          if (!response.toolCalls || response.toolCalls.length === 0) break;
+          // If no tool calls, we're done — unless the response was truncated
+          // by the output token limit, in which case it is not a final answer:
+          // keep the partial text, ask the model to continue, and loop.
+          if (!response.toolCalls || response.toolCalls.length === 0) {
+            if (response.finishReason === 'length' && truncatedContinuations < MAX_TRUNCATED_CONTINUATIONS) {
+              truncatedContinuations++;
+              pendingPartial += response.text || '';
+              conversation.push({ role: 'assistant' as const, content: response.text || '' });
+              conversation.push({
+                role: 'user' as const,
+                content: 'Your previous response was cut off because the output token limit was reached. Continue from exactly where you left off. Do not repeat anything you already wrote.',
+              });
+              continue;
+            }
+            break;
+          }
 
-          // Add the assistant's tool-use message to conversation
-          conversation.push({ role: 'assistant' as const, content: response.text || '' });
+          // Add the assistant's tool-use message to conversation.
+          // Some providers (DeepSeek) require the reasoning payload to be
+          // echoed back when thinking mode is enabled and the model made
+          // tool calls — otherwise they return 400.
+          conversation.push({
+            role: 'assistant' as const,
+            content: response.text || '',
+            ...(response.reasoning ? { thinking: response.reasoning } : {}),
+          });
 
           // Execute each tool call and add results
           for (const tc of response.toolCalls) {
@@ -1781,6 +1890,7 @@ export class FlowExecutor {
           systemPrompt: '',
           messages: [{ role: 'user', content: resolvedPrompt }],
           temperature,
+          thinkingMode: aiConfig.thinkingMode,
         }, endpoint);
         return { content: result.text };
       }

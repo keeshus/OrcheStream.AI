@@ -11,12 +11,17 @@ import { startReconciliation, stopReconciliation } from './schedule-reconciliati
 async function main() {
   console.log('Worker started, waiting for jobs...');
 
-  const { getDb, flows, executions, executionSteps, agentContexts, agentStore, groups, userAssignments } = await import('orchestream-ai-shared');
+  const { getDb, flows, executions, executionSteps, agentContexts, agentStore, groups, userAssignments, secretAccessLog } = await import('orchestream-ai-shared');
   const { db } = getDb();
   const { eq, and, inArray } = await import('drizzle-orm');
 
   const sidecarClient = createSidecarClient();
   const reaper = createReaper(sidecarClient, db, executions);
+
+  // Register vector stores so retriever nodes work in worker-executed runs
+  // (the backend does the same at startup).
+  const { initVectorStores } = await import('orchestream-ai-shared');
+  initVectorStores(db).catch(() => {});
 
   const worker = createExecutionWorker(async (job) => {
     const { flow, input, flowId } = job;
@@ -43,6 +48,7 @@ async function main() {
         updatedAt: '',
         flowContext: dbFlow.flow_context || '',
         groupId: dbFlow.group_id || undefined,
+        envVars: dbFlow.env_vars || [],
       };
     } else {
       console.error('Invalid job: missing both flow and flowId');
@@ -67,23 +73,36 @@ async function main() {
         .where(eq(executions.id, execId));
     }
 
-    const result = await executeFlowWithPersistence({
-      flow: flowDef,
-      input: resolvedInput,
-      executionId: execId,
-      db,
-      executionsTable: executions,
-      executionStepsTable: executionSteps,
-      eq,
-      and,
-      inArray,
-      agentContextsTable: agentContexts,
-      agentStoreTable: agentStore,
-      groupsTable: groups,
-      userAssignmentsTable: userAssignments,
-    });
+    try {
+      const result = await executeFlowWithPersistence({
+        flow: flowDef,
+        input: resolvedInput,
+        executionId: execId,
+        db,
+        executionsTable: executions,
+        executionStepsTable: executionSteps,
+        eq,
+        and,
+        inArray,
+        agentContextsTable: agentContexts,
+        agentStoreTable: agentStore,
+        groupsTable: groups,
+        userAssignmentsTable: userAssignments,
+        secretAccessLogTable: secretAccessLog,
+        flowsTable: flows,
+      });
 
-    console.log(`Flow ${flowDef.id}: ${result.status} (exec ${execId})`);
+      console.log(`Flow ${flowDef.id}: ${result.status} (exec ${execId})`);
+    } catch (err) {
+      // The runner handles most failures internally; anything escaping it (e.g.
+      // a DB failure) must not leave the execution stuck in 'running'.
+      const error = err instanceof Error ? err.message : String(err);
+      console.error(`Flow ${flowDef.id} failed with unhandled error (exec ${execId}):`, error);
+      await db.update(executions).set({
+        status: 'failed', error, completed_at: new Date(),
+      }).where(eq(executions.id, execId)).catch(() => {});
+      throw err;
+    }
   });
 
   reaper.start();

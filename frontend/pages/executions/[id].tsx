@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { Icon } from '@/components/ui/Icon';
 import { StepTree } from '@/components/execution/StepTree';
 import { Tooltip } from '@/components/ui/Tooltip';
+import { BrandLogo } from '@/components/BrandLogo';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
 
@@ -89,6 +90,10 @@ export default function ExecutionDetailPage() {
       <div className="max-w-4xl mx-auto p-6">
         {/* Header */}
         <div className="flex items-center gap-3 mb-6">
+          <Link href="/" className="flex items-center gap-1.5 shrink-0 leading-none text-on-surface-variant hover:text-on-surface-variant" title="Home">
+            <BrandLogo size="sm" />
+            <span>Home</span>
+          </Link>
           <Tooltip content="Back to flows">
             <Link href="/flows" className="flex items-center gap-1 text-sm text-on-surface-variant hover:text-on-surface transition-colors">
               <Icon name="arrow_back" className="text-base" /> Back

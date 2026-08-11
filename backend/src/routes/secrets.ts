@@ -4,7 +4,7 @@ import { db } from '../db/connection.js';
 import { secrets, secretAccessLog, groupMembers, flows } from '../db/schema.js';
 import { authenticate, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/async-handler.js';
-import { encrypt, decrypt, ensureInitialKeyVersion, reEncryptAllSecrets, rotateEncryptionKey } from '../utils/encryption.js';
+import { encrypt, decrypt, ensureInitialKeyVersion, reEncryptAllSecrets, rotateEncryptionKey } from 'orchestream-ai-shared';
 import rateLimit from 'express-rate-limit';
 
 const router = Router();

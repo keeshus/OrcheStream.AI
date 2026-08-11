@@ -3,6 +3,7 @@ import { useRouter } from 'next/router';
 import { useAuth } from '@/lib/auth-context';
 import { Icon } from '@/components/ui/Icon';
 import { BrandLogo } from '@/components/BrandLogo';
+import { BetaBadge } from '@/components/BetaBadge';
 import { PasswordStrengthMeter } from '@/components/PasswordStrength';
 import { TextField } from '@/components/ui/TextField';
 
@@ -73,7 +74,7 @@ export default function SetupPage() {
         <div className="bg-surface rounded-xl shadow-sm border p-8">
           <div className="flex items-center gap-3 mb-4">
             <BrandLogo size="sm" />
-            <h1 className="text-2xl font-bold text-on-surface">Welcome to OrcheStream.AI</h1>
+            <h1 className="text-2xl font-bold text-on-surface">Welcome to OrcheStream.AI <BetaBadge /></h1>
           </div>
           <p className="text-sm text-on-surface-variant mb-6">Create the first admin account to get started.</p>
           {error && <div className="bg-error-container border border-red-200 text-red-700 text-sm rounded p-3 mb-4">{error}</div>}

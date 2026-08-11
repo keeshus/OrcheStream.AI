@@ -97,10 +97,9 @@ spec:
             readOnlyRootFilesystem: true
             runAsUser: 1001
             runAsNonRoot: true
-            # SYS_ADMIN is REQUIRED by the Landlock sandbox (landlock-helper) —
-            # keep it, drop everything else.
+            # Landlock works unprivileged: landlock-helper sets PR_SET_NO_NEW_PRIVS
+            # itself, so no extra capabilities are needed — drop everything.
             capabilities:
-              add: ["SYS_ADMIN"]
               drop: ["ALL"]
           resources:
             {{- toYaml .Values.sidecar.resources | nindent 12 }}

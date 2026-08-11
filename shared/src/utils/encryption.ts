@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { getDb } from '../db/connection.js';
 
 const ALGORITHM = 'aes-256-gcm';
 const KEY_LENGTH = 32;
@@ -25,7 +26,7 @@ export function getKek(): Buffer {
 }
 
 export async function ensureInitialKeyVersion(): Promise<void> {
-  const { db } = await import('../db/connection.js');
+  const { db } = getDb();
   const { encryptionKeyVersions } = await import('../db/schema.js');
   const { eq } = await import('drizzle-orm');
   const [existing] = await db.select().from(encryptionKeyVersions).where(eq(encryptionKeyVersions.is_current, true));
@@ -44,7 +45,7 @@ export async function encrypt(plaintext: string): Promise<{
   tag: string;
   keyVersion: number;
 }> {
-  const { db } = await import('../db/connection.js');
+  const { db } = getDb();
   const { encryptionKeyVersions } = await import('../db/schema.js');
   const { eq } = await import('drizzle-orm');
 
@@ -76,7 +77,7 @@ export async function decrypt(
   tag: string,
   keyVersion: number
 ): Promise<string> {
-  const { db } = await import('../db/connection.js');
+  const { db } = getDb();
   const { encryptionKeyVersions } = await import('../db/schema.js');
   const { eq } = await import('drizzle-orm');
 
@@ -95,7 +96,7 @@ export async function decrypt(
 }
 
 export async function rotateEncryptionKey(): Promise<{ version: number }> {
-  const { db } = await import('../db/connection.js');
+  const { db } = getDb();
   const { encryptionKeyVersions } = await import('../db/schema.js');
   const { eq } = await import('drizzle-orm');
 
@@ -129,7 +130,7 @@ export async function rotateEncryptionKey(): Promise<{ version: number }> {
 }
 
 export async function reEncryptAllSecrets(): Promise<number> {
-  const { db } = await import('../db/connection.js');
+  const { db } = getDb();
   const { secrets, encryptionKeyVersions } = await import('../db/schema.js');
   const { eq } = await import('drizzle-orm');
 

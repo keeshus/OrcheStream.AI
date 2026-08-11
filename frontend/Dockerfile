@@ -17,6 +17,10 @@ COPY frontend/package*.json ./frontend/
 # npm ci for reproducible builds (exact versions from package-lock.json)
 RUN npm ci -w shared -w frontend && npm cache clean --force
 
+# Build shared so the typecheck and Turbopack can resolve the compiled
+# package (shared/package.json points main at ./dist/index.js)
+RUN cd shared && npx -p typescript@7.0.2 tsc
+
 # Frontend source + build
 COPY frontend/tsconfig.json ./frontend/
 COPY frontend/next.config.js ./frontend/

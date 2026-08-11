@@ -4,6 +4,8 @@ import { TextField } from '@/components/ui/TextField';
 import { SelectField } from '@/components/ui/SelectField';
 import { TemplateAutocomplete } from './TemplateAutocomplete';
 import { JsonSchemaBuilder } from './JsonSchemaBuilder';
+import { ThinkingModeSelect } from './ThinkingModeSelect';
+import type { ThinkingMode } from 'orchestream-ai-shared/thinking';
 
 const PROVIDER_LABELS: Record<string, string> = {
   anthropic: 'Anthropic',
@@ -19,6 +21,7 @@ interface LLMAgentConfigProps {
     responseFormat: 'text' | 'json_object';
     outputSchema?: string;
     contextIds?: string[];
+    thinkingMode?: ThinkingMode;
   };
   onChange: (config: any) => void;
   suggestions?: { upstreamLabels: string[]; nodes: any[]; edges: any[]; nodeId: string };
@@ -147,7 +150,9 @@ export function LLMAgentConfig({ config, onChange, suggestions, flow }: LLMAgent
           edges={suggestions?.edges || []}
           selectedFields={(config as any).inputFields}
         />
-        <p className="mt-1 text-[10px] text-on-surface-variant">Use {'{{'}input.Label.field{'}}'} to reference upstream data.</p>
+        <p className="mt-1 text-[10px] text-on-surface-variant">
+          Only this prompt is sent to the model. Reference inputs with {'{{'}input.Label.field{'}}'} — nothing is added automatically. Chat flows: use {'{{'}input.message{'}}'} and {'{{'}input.history{'}}'}.
+        </p>
       </label>
 
       <SelectField
@@ -158,6 +163,12 @@ export function LLMAgentConfig({ config, onChange, suggestions, flow }: LLMAgent
           { value: 'text', label: 'Plain Text' },
           { value: 'json_object', label: 'JSON' },
         ]}
+      />
+
+      <ThinkingModeSelect
+        endpoint={selectedEndpoint}
+        value={config.thinkingMode || 'default'}
+        onChange={(mode) => onChange({ ...config, thinkingMode: mode })}
       />
 
       {config.responseFormat === 'json_object' && (

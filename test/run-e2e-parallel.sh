@@ -17,12 +17,14 @@ STACK_PORTS[2,frontend]=3010  STACK_PORTS[2,backend]=3011  STACK_PORTS[2,mock_ll
 STACK_PORTS[3,frontend]=3020  STACK_PORTS[3,backend]=3021  STACK_PORTS[3,mock_llm]=3022  STACK_PORTS[3,mock_mcp]=3023  STACK_PORTS[3,mock_oidc]=3024  STACK_PORTS[3,mock_cyberark]=3025  STACK_PORTS[3,postgres]=5452  STACK_PORTS[3,valkey]=6399  STACK_PORTS[3,qdrant]=6353  STACK_PORTS[3,sidecar]=4021
 STACK_PORTS[4,frontend]=3030  STACK_PORTS[4,backend]=3031  STACK_PORTS[4,mock_llm]=3032  STACK_PORTS[4,mock_mcp]=3033  STACK_PORTS[4,mock_oidc]=3034  STACK_PORTS[4,mock_cyberark]=3035  STACK_PORTS[4,postgres]=5462  STACK_PORTS[4,valkey]=6409  STACK_PORTS[4,qdrant]=6363  STACK_PORTS[4,sidecar]=4031
 
-# Balanced across 4 stacks — each gets 1-2 heavy tests + medium/light fillers
-# Stack 1 gets port-sensitive tests (SSO hardcodes port 3004, openai-chat)
-GROUP1="test/e2e/10-auth.spec.ts test/e2e/20-flows-overview.spec.ts test/e2e/30-flow-editor.spec.ts test/e2e/35-node-config.spec.ts test/e2e/76-sso.spec.ts test/e2e/98-openai-chat.spec.ts test/e2e/99-extended-api.spec.ts test/e2e/99-knowledge-vectors-admin.spec.ts"
-GROUP2="test/e2e/40-flow-save-load.spec.ts test/e2e/50-debug-run.spec.ts test/e2e/60-chat-flow.spec.ts test/e2e/70-settings.spec.ts test/e2e/75-groups.spec.ts test/e2e/77-subflows.spec.ts test/e2e/78-advanced-flows.spec.ts test/e2e/91-co-pilot-group-context.spec.ts test/e2e/97-webhook-api.spec.ts test/e2e/98-schedule.spec.ts"
-GROUP3="test/e2e/79-agent-contexts.spec.ts test/e2e/80-co-pilot.spec.ts test/e2e/80-secrets.spec.ts test/e2e/81-sandbox.spec.ts test/e2e/82-env-vars-ui.spec.ts test/e2e/84-flow-env-vars.spec.ts test/e2e/85-sidecar-lifecycle.spec.ts test/e2e/86-sidecar-capabilities.spec.ts test/e2e/87-co-pilot-output-shape.spec.ts test/e2e/88-co-pilot-set-schema.spec.ts"
-GROUP4="test/e2e/83-subflow-env.spec.ts test/e2e/90-node-types.spec.ts test/e2e/92-co-pilot-crud.spec.ts test/e2e/93-flow-editor-tools.spec.ts test/e2e/94-node-type-configs.spec.ts test/e2e/95-webhook.spec.ts test/e2e/96-flow-tool.spec.ts test/e2e/99-complex-flows.spec.ts"
+# Balanced by measured duration (sequential pass: total ~628s → ~150-165s per
+# stack). Stack 1 keeps the port-sensitive tests (SSO hardcodes port 3004,
+# openai-chat). Keep workers=1 per stack — workers=2 causes cross-test
+# interference (webhook/tool/parallel specs fail).
+GROUP1="test/e2e/10-auth.spec.ts test/e2e/30-flow-editor.spec.ts test/e2e/76-sso.spec.ts test/e2e/77-subflows.spec.ts test/e2e/78-advanced-flows.spec.ts test/e2e/81-sandbox.spec.ts test/e2e/84-flow-env-vars.spec.ts test/e2e/85-sidecar-lifecycle.spec.ts test/e2e/86-sidecar-capabilities.spec.ts test/e2e/87-co-pilot-output-shape.spec.ts test/e2e/98-openai-chat.spec.ts test/e2e/99-extended-api.spec.ts test/e2e/99-knowledge-vectors-admin.spec.ts"
+GROUP2="test/e2e/20-flows-overview.spec.ts test/e2e/35-node-config.spec.ts test/e2e/40-flow-save-load.spec.ts test/e2e/50-debug-run.spec.ts test/e2e/60-chat-flow.spec.ts test/e2e/75-groups.spec.ts test/e2e/80-secrets.spec.ts test/e2e/90-node-types.spec.ts test/e2e/92-co-pilot-crud.spec.ts test/e2e/95-webhook.spec.ts test/e2e/98-schedule.spec.ts"
+GROUP3="test/e2e/79-agent-contexts.spec.ts test/e2e/80-co-pilot.spec.ts test/e2e/82-env-vars-ui.spec.ts test/e2e/83-subflow-env.spec.ts test/e2e/101-real-llm.spec.ts"
+GROUP4="test/e2e/70-settings.spec.ts test/e2e/88-co-pilot-set-schema.spec.ts test/e2e/91-co-pilot-group-context.spec.ts test/e2e/93-flow-editor-tools.spec.ts test/e2e/94-node-type-configs.spec.ts test/e2e/96-flow-tool.spec.ts test/e2e/97-webhook-api.spec.ts test/e2e/99-complex-flows.spec.ts test/e2e/100-thinking-mode.spec.ts"
 
 run_stack() {
   local STACK_ID=$1
@@ -54,7 +56,7 @@ run_stack() {
   VALKEY_PORT=$VALKEY_PORT \
   QDRANT_PORT=$QDRANT_PORT \
   SIDECAR_PORT=$SIDECAR_PORT \
-  docker compose -p "$PROJECT" -f docker-compose.e2e.stack.yml up -d --build --wait 2>&1 | tail -3
+  docker compose -p "$PROJECT" -f docker-compose.e2e.stack.yml up -d --wait 2>&1 | tail -3
 
   # Frontend has no Docker health check — wait until it actually serves HTTP
   echo "[Stack $STACK_ID] Waiting for frontend..."
@@ -86,6 +88,14 @@ run_stack() {
   fi
   echo "[Stack $STACK_ID] Frontend + backend ready"
 
+  # Warm up Next.js dev compilation (the e2e frontend runs `next dev`). With 4
+  # stacks booting at once, the first test's page.goto can exceed the 30s test
+  # timeout while the editor page is still being compiled on demand.
+  echo "[Stack $STACK_ID] Warming up frontend compilation..."
+  for path in /flows/new/edit /settings /; do
+    curl -sf -o /dev/null --max-time 120 "http://localhost:${FRONTEND_PORT}${path}" || true
+  done
+
   local AUTH_FILE="e2e/.auth/user-s${STACK_ID}.json"
 
   echo "[Stack $STACK_ID] Setup..."
@@ -116,6 +126,9 @@ run_stack() {
   docker compose -p "$PROJECT" -f docker-compose.e2e.stack.yml down -v --timeout 10 2>&1 | tail -1
   return $RESULT
 }
+
+echo "=== Building shared E2E images (once, reused by all stacks) ==="
+docker compose -f docker-compose.e2e.stack.yml build 2>&1 | tail -2
 
 echo "=== Starting 4 parallel E2E stacks ==="
 

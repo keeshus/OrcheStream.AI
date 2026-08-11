@@ -213,6 +213,51 @@ describe('FlowExecutor', () => {
     expect(result.steps.some(s => s.nodeId === 'llm2')).toBe(true);
   });
 
+  it('records the fully injected prompt (context layers + resolved template + sandbox notes) on LLM Agent steps', async () => {
+    const flow = makeFlow(
+      [
+        makeNode('trigger', 'trigger'),
+        makeNode('llm1', 'llm-agent', { config: { endpointId: 'ep1', model: 'claude-3', systemPrompt: 'Review this request: {{input.message}}', temperature: 0.7, maxTokens: 1000, responseFormat: 'text' } }),
+      ],
+      [makeEdge('e1', 'trigger', 'llm1')],
+    );
+    context.getGlobalContext = vi.fn().mockResolvedValue('GLOBAL CONTEXT BLOCK');
+    context.getGroupContext = vi.fn().mockResolvedValue('GROUP CONTEXT BLOCK');
+    flow.groupId = 'grp-1';
+
+    await executor.execute(flow, { message: 'hello' }, onEvent, context);
+
+    const started = onEvent.mock.calls
+      .map((c: any) => c[1])
+      .find((e: any) => e.type === 'step.started' && e.data?.nodeId === 'llm1');
+    expect(started).toBeDefined();
+    const prompt: string = started.data.input.systemPrompt || '';
+
+    // Context layering: global → group → node prompt (template resolved)
+    expect(prompt).toContain('GLOBAL CONTEXT BLOCK');
+    expect(prompt).toContain('GROUP CONTEXT BLOCK');
+    expect(prompt).toContain('Review this request: hello');
+    // Sandbox environment notes are injected after the layers
+    expect(prompt).toContain('You are running inside a flow execution');
+  });
+
+  it('records the structured-output instruction on JSON LLM Agent steps', async () => {
+    const flow = makeFlow(
+      [
+        makeNode('trigger', 'trigger'),
+        makeNode('llm1', 'llm-agent', { config: { endpointId: 'ep1', model: 'claude-3', systemPrompt: '', temperature: 0.7, maxTokens: 1000, responseFormat: 'json_object' } }),
+      ],
+      [makeEdge('e1', 'trigger', 'llm1')],
+    );
+
+    await executor.execute(flow, { message: 'x' }, onEvent, context);
+
+    const started = onEvent.mock.calls
+      .map((c: any) => c[1])
+      .find((e: any) => e.type === 'step.started' && e.data?.nodeId === 'llm1');
+    expect(started!.data.input.systemPrompt).toContain('You must use the structured_output tool to respond');
+  });
+
   it('output node filters input to only specified inputFields', async () => {
     const flow = makeFlow(
       [
@@ -1305,6 +1350,180 @@ describe('FlowExecutor', () => {
         'LLM API call failed repeatedly',
       );
       mockCallLLM.mockImplementation(defaultCallLLM);
+    });
+
+    it('continues the loop when a response is truncated (finishReason length) and keeps the partial text', async () => {
+      const mockCallLLM = vi.mocked(callLLM);
+      mockCallLLM.mockClear();
+      let calls = 0;
+      mockCallLLM.mockImplementation(async () => {
+        calls++;
+        if (calls === 1) return { text: 'PART ONE: the review begins', finishReason: 'length', toolCalls: [] };
+        return { text: 'PART TWO: the review ends', finishReason: 'stop', toolCalls: [] };
+      });
+
+      const result = await executor.execute(flow, { message: 'hi' }, onEvent, context);
+
+      expect(calls).toBe(2);
+      // The truncated response must not be treated as the final answer:
+      // the loop continues and the final output concatenates both parts.
+      expect((result.output as any).l1.content).toBe('PART ONE: the review beginsPART TWO: the review ends');
+      const msgs = mockCallLLM.mock.calls[1][0].messages;
+      expect(msgs.some((m: any) => m.role === 'user' && String(m.content).includes('cut off'))).toBe(true);
+      mockCallLLM.mockImplementation(defaultCallLLM);
+    });
+
+    it('trims the conversation and retries when the provider reports a context overflow', async () => {
+      const mockCallLLM = vi.mocked(callLLM);
+      mockCallLLM.mockClear();
+      let calls = 0;
+      mockCallLLM.mockImplementation(async () => {
+        calls++;
+        // Several tool rounds first so there is middle history to trim
+        if (calls < 6) return { text: 'exploring...', toolCalls: [{ id: `t${calls}`, name: 'store_get', input: { key: 'k' } }] };
+        if (calls === 6) throw new Error("This model's maximum context length is 64000 tokens. However, your messages resulted in 80000 tokens.");
+        return { text: 'final answer after trim', toolCalls: [] };
+      });
+
+      const result = await executor.execute(flow, { message: 'hi' }, onEvent, context);
+
+      expect(calls).toBe(7);
+      expect((result.output as any).l1.content).toBe('final answer after trim');
+      // The conversation was compacted (head kept, oldest rounds dropped) and
+      // the model was told the context was trimmed.
+      const msgs = mockCallLLM.mock.calls[6][0].messages;
+      expect(msgs[msgs.length - 1].content).toContain('trimmed');
+      mockCallLLM.mockImplementation(defaultCallLLM);
+    });
+
+    it('fails the node when trimming cannot fix a context overflow', async () => {
+      const mockCallLLM = vi.mocked(callLLM);
+      mockCallLLM.mockClear();
+      // A conversation with only the initial messages cannot be trimmed —
+      // the overflow must surface as a node failure instead of hanging.
+      mockCallLLM.mockRejectedValue(new Error('maximum context length exceeded'));
+
+      await expect(executor.execute(flow, { message: 'hi' }, onEvent, context)).rejects.toThrow(
+        'LLM API call failed repeatedly',
+      );
+      mockCallLLM.mockImplementation(defaultCallLLM);
+    });
+  });
+
+  describe('llm-agent prompt-only contract', () => {
+    const defaultCallLLM = vi.fn(() => Promise.resolve({ text: 'mock LLM response' }));
+    const flow = makeFlow(
+      [
+        makeNode('trigger', 'trigger'),
+        makeNode('l1', 'llm-agent', {
+          config: { endpointId: 'ep1', model: 'claude-3', systemPrompt: '', responseFormat: 'text' },
+        }),
+      ],
+      [makeEdge('e1', 'trigger', 'l1')],
+    );
+
+    afterEach(() => {
+      vi.mocked(callLLM).mockImplementation(defaultCallLLM);
+    });
+
+    function lastMessages(): any[] {
+      const mockCallLLM = vi.mocked(callLLM);
+      return mockCallLLM.mock.calls[mockCallLLM.mock.calls.length - 1][0].messages;
+    }
+
+    it('never sends run input data as the user message', async () => {
+      const mockCallLLM = vi.mocked(callLLM);
+      mockCallLLM.mockClear();
+
+      const secret = 'https://github.com/keeshus/TopSecretRepo';
+      await executor.execute(
+        flow,
+        { message: secret, trigger: { message: secret }, upstream: { internal: 'classified' } },
+        onEvent,
+        context,
+      );
+
+      const msgs = lastMessages();
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].role).toBe('user');
+      expect(msgs[0].content).toBe('Proceed.');
+      expect(JSON.stringify(msgs)).not.toContain('TopSecretRepo');
+      expect(JSON.stringify(msgs)).not.toContain('classified');
+    });
+
+    it('never sends chat_input as a user message either', async () => {
+      const mockCallLLM = vi.mocked(callLLM);
+      mockCallLLM.mockClear();
+
+      await executor.execute(
+        flow,
+        {
+          chat_input: {
+            message: 'chat secret message',
+            history: [{ role: 'user', content: 'old turn' }],
+          },
+          message: 'chat secret message',
+          history: [{ role: 'user', content: 'old turn' }],
+        },
+        onEvent,
+        context,
+      );
+
+      const msgs = lastMessages();
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].content).toBe('Proceed.');
+      expect(JSON.stringify(msgs)).not.toContain('chat secret message');
+      expect(JSON.stringify(msgs)).not.toContain('old turn');
+    });
+
+    it('resolves {{input.…}} variables in the system prompt', async () => {
+      const mockCallLLM = vi.mocked(callLLM);
+      mockCallLLM.mockClear();
+      const promptFlow = makeFlow(
+        [
+          makeNode('trigger', 'trigger'),
+          makeNode('l1', 'llm-agent', {
+            config: { endpointId: 'ep1', model: 'claude-3', systemPrompt: 'Review this repo: {{input.trigger.message}}', responseFormat: 'text' },
+          }),
+        ],
+        [makeEdge('e1', 'trigger', 'l1')],
+      );
+
+      await executor.execute(promptFlow, { message: 'https://github.com/keeshus/CoreTemplate' }, onEvent, context);
+
+      const call = mockCallLLM.mock.calls[0][0];
+      expect(String(call.systemPrompt)).toContain('Review this repo: https://github.com/keeshus/CoreTemplate');
+    });
+
+    it('resolves {{input.message}} and {{input.history}} variables in the system prompt (chat flows)', async () => {
+      const mockCallLLM = vi.mocked(callLLM);
+      mockCallLLM.mockClear();
+      const promptFlow = makeFlow(
+        [
+          makeNode('trigger', 'trigger'),
+          makeNode('l1', 'llm-agent', {
+            config: {
+              endpointId: 'ep1', model: 'claude-3',
+              systemPrompt: 'User said: {{input.message}}\nHistory: {{input.history}}',
+              responseFormat: 'text',
+            },
+          }),
+        ],
+        [makeEdge('e1', 'trigger', 'l1')],
+      );
+
+      await executor.execute(
+        promptFlow,
+        { message: 'hello', history: [{ role: 'user', content: 'hi' }] },
+        onEvent,
+        context,
+      );
+
+      const call = mockCallLLM.mock.calls[0][0];
+      const prompt = String(call.systemPrompt);
+      expect(prompt).toContain('User said: hello');
+      expect(prompt).toContain('History: [{');
+      expect(prompt).toContain('"role":"user"');
     });
   });
 

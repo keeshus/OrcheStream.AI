@@ -2,6 +2,7 @@ import { useRouter } from 'next/router';
 import { useEffect, useState, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { Icon } from '@/components/ui/Icon';
+import { BrandLogo } from '@/components/BrandLogo';
 import { TextField } from '@/components/ui/TextField';
 import { useAssistantContext } from '@/hooks/useAssistantContext';
 import ReactMarkdown from 'react-markdown';
@@ -127,6 +128,10 @@ export default function ChatPage() {
     <div className="h-screen flex flex-col bg-surface">
       {/* Header */}
       <div className="h-12 border-b border-outline-variant flex items-center px-4 shrink-0 bg-surface-container">
+          <Link href="/" className="flex items-center gap-1.5 mr-3 shrink-0 leading-none text-on-surface-variant hover:text-on-surface-variant" title="Home">
+            <BrandLogo size="sm" />
+            <span>Home</span>
+          </Link>
           <Link href={`/chat/${flowId}`} className="flex items-center gap-1 leading-none text-on-surface-variant hover:text-on-surface mr-3">
             <Icon name="arrow_back" className="text-base" /> <span className="text-xs">Back</span>
         </Link>

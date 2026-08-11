@@ -27,6 +27,7 @@ yarn-error.log*
 .vscode
 example-transaction-files/
 test/e2e/.auth/
+test/.env.e2e
 /e2e/
 test-results/
 test-results-e2e-*/

@@ -5,8 +5,8 @@ import { db } from '../db/connection.js';
 import { secretVaults, groupVaultConfig } from '../db/schema.js';
 import { authenticate, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/async-handler.js';
-import { encrypt, decrypt, ensureInitialKeyVersion } from '../utils/encryption.js';
-import { testConnection } from '../services/cyberark.js';
+import { encrypt, decrypt, ensureInitialKeyVersion } from 'orchestream-ai-shared';
+import { testConnection } from 'orchestream-ai-shared';
 
 const router = Router();
 router.use(authenticate);

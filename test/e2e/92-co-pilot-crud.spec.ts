@@ -279,7 +279,8 @@ test.describe('Co-Pilot tools', () => {
     });
     expect(approveRes.ok).toBe(true);
     const approved = await approveRes.json();
-    expect(approved.status).toBe('completed');
+    // The approval enqueues a replay job for the worker — the run completes asynchronously
+    expect(['running', 'completed']).toContain(approved.status);
 
     // State transition: awaiting_approval -> completed
     const exec = await pollExecution(request, executionId, 30000);
@@ -655,7 +656,7 @@ test.describe('Co-Pilot tools', () => {
       edges: [{ id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' }],
     });
     const flow = await flowRes.json();
-    const res = await request.post(`${API_URL}/flows/${flow.id}/execute`, { data: { input: { message: 'test' }, _debug: true } });
+    const res = await request.post(`${API_URL}/flows/${flow.id}/execute`, { data: { input: { _debug: true, message: 'test' }, _debug: true } });
     expect(res.ok()).toBe(true);
     await deleteFlow(request, flow.id);
   });

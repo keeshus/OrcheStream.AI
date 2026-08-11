@@ -166,7 +166,7 @@ function StepCardInner({ step, expanded, onToggle, compact, showInputs, showOutp
 
           {showInputs && hasSystemPrompt && (
             <div>
-              <h4 className="text-[10px] font-semibold text-on-surface-variant uppercase tracking-wider mb-1">System Prompt</h4>
+              <h4 className="text-[10px] font-semibold text-on-surface-variant uppercase tracking-wider mb-1">Injected Prompt</h4>
               <pre className="text-xs bg-surface border rounded p-2 whitespace-pre-wrap break-all max-h-24 overflow-y-auto">{step.input.systemPrompt}</pre>
             </div>
           )}
