@@ -105,14 +105,14 @@ export function createQdrantStore(url: string, apiKey?: string): VectorStore {
       const safeName = collectionName.replace(/[^a-zA-Z0-9_-]/g, '_');
 
       try {
-        const result = await client.search(safeName, {
-          vector: queryEmbedding,
+        const result = await client.query(safeName, {
+          query: queryEmbedding,
           limit: topK,
           score_threshold: minScore,
           with_payload: true,
         });
 
-        return result.map(r => ({
+        return result.points.map((r: any) => ({
           documentId: (r.payload as any)?.documentId || '',
           chunkText: (r.payload as any)?.chunkText || '',
           chunkIndex: (r.payload as any)?.chunkIndex || 0,
