@@ -449,6 +449,46 @@ export function DebugOverlay({ flowId, onClose, nodes: canvasNodes, edges: canva
       });
       const result = await res.json();
       if (result.status === 'completed') {
+        // Debug runs stream no events during resume — the response carries
+        // the finished steps and final output directly. The in-memory steps
+        // carry no node labels, so resolve them from the canvas.
+        if (result.steps) {
+          const labelOf = (id: string) => canvasNodes?.find((n: any) => n.id === id)?.data?.label || '';
+          const mappedSteps: StepInfo[] = result.steps.map((s: any) => ({
+            nodeId: s.node_id ?? s.nodeId,
+            nodeType: s.node_type ?? s.nodeType,
+            nodeLabel: s.node_label ?? s.nodeLabel ?? labelOf(s.node_id ?? s.nodeId),
+            status: s.status,
+            input: s.input,
+            output: s.output,
+            error: s.error || null,
+            startedAt: s.started_at ?? s.startedAt,
+            completedAt: s.completed_at ?? s.completedAt,
+            tokens: s.tokens || [],
+            iteration: s.iteration ?? 0,
+            children: s.children,
+          }));
+          setSteps(mappedSteps);
+        }
+        setFinalOutput(result.output);
+        setStatus('completed');
+      } else if (result.status === 'paused') {
+        // Another HITL node paused during the resumed run — show it.
+        setHitlPause({
+          executionId: result.executionId || hitlPause.executionId,
+          prompt: result.prompt || 'Waiting for approval',
+          buttons: result.buttons || hitlPause.buttons,
+          nodeId: result.nodeId || '',
+          allowFeedback: result.allowFeedback !== false,
+        });
+        setHitlFeedback('');
+        setStatus('completed');
+      } else if (result.status === 'failed') {
+        setError(result.error || 'Execution failed');
+        setStatus('failed');
+      } else if (result.status === 'completed' || result.status === 'running') {
+        // Persisted-run path: the approve response only confirms the resume —
+        // the execution record carries the outcome.
         const detail = await fetch(`${API_URL}/flows/${flowId}/executions/${hitlPause.executionId}`, { credentials: 'include' });
         const data = await detail.json();
         if (data.steps) {
@@ -470,9 +510,6 @@ export function DebugOverlay({ flowId, onClose, nodes: canvasNodes, edges: canva
         }
         setFinalOutput(result.output || data.output);
         setStatus('completed');
-      } else if (result.status === 'failed') {
-        setError(result.error || 'Execution failed');
-        setStatus('failed');
       } else {
         setStatus('running');
       }
@@ -480,7 +517,7 @@ export function DebugOverlay({ flowId, onClose, nodes: canvasNodes, edges: canva
       setError(err.message || 'Approval failed');
       setStatus('failed');
     }
-  }, [hitlPause, flowId]);
+  }, [hitlPause, flowId, canvasNodes]);
 
   const handleHitlReject = useCallback(async () => {
     if (!hitlPause) return;

@@ -7,8 +7,10 @@ export function SwitchNode(props: NodeProps) {
   const fieldPath = config?.fieldPath || '';
   const hasDefault = !!config?.defaultPath;
   const totalOutputs = cases.length + (hasDefault ? 1 : 0);
+  // Only case labels get BaseNode handles — the default path is rendered as
+  // its own warning-coloured handle below (same output-<n> id, otherwise the
+  // default label would produce a duplicate handle id).
   const allLabels = cases.map(c => c.label || c.value);
-  if (hasDefault) allLabels.push(config.defaultPath);
 
   return (
     <BaseNode label={(props.data?.label as string) || 'Switch'} nodeType="Switch" category="processing" selected={props.selected || false} inputs={1} outputs={totalOutputs} outputLabels={allLabels} warnings={props.data?._warnings as string[] | undefined}>

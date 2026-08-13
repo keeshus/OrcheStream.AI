@@ -16,6 +16,23 @@ const router = Router();
 // In-memory registry of active executors for cancellation
 const activeExecutors = new Map<string, FlowExecutor>();
 
+// Debug (in-process) runs persist nothing, so their HITL pauses are resumed
+// in-process too — the approve endpoint resumes these instead of looking up
+// an execution record. Keyed by the debug execution id.
+interface PausedDebugExecution {
+  flow: FlowDefinition;
+  input: Record<string, unknown>;
+  context: import('../../../worker/src/executor/engine.js').ExecutionContext;
+  savedOutputs: Record<string, unknown>;
+  hitlNodeId: string;
+  buttons: Array<{ label: string; value: string; icon?: string }>;
+  prompt: string;
+  allowFeedback: boolean;
+  sandboxExecutionId: string;
+  sandboxManager: ReturnType<typeof createSandboxManager>;
+}
+const pausedDebugExecutions = new Map<string, PausedDebugExecution>();
+
 interface FlowScopeRow {
   created_by: string | null;
   group_id: string | null;
@@ -397,6 +414,20 @@ router.post(
           skipTeardown = true;
           activeExecutors.delete(execId);
           const hitlCfg = (flowDef.nodes || []).find((n: any) => n.id === err.nodeId)?.data?.config || {};
+          // Keep the pause state so the approve endpoint can resume this
+          // in-process run (no persisted record exists for debug runs).
+          pausedDebugExecutions.set(execId, {
+            flow: flowDef,
+            input: input as Record<string, unknown>,
+            context: executionContext,
+            savedOutputs: err.savedOutputs || {},
+            hitlNodeId: err.nodeId,
+            buttons: err.buttons || [],
+            prompt: err.prompt || 'Waiting for approval',
+            allowFeedback: (hitlCfg as any).allowFeedback !== false,
+            sandboxExecutionId,
+            sandboxManager,
+          });
           emitSSE({
             type: 'execution.paused',
             executionId: execId,
@@ -457,6 +488,60 @@ router.post(
 router.post('/executions/:executionId/approve', asyncHandler(async (req, res) => {
   const executionId = req.params.executionId as string;
   const { feedback = '', decision = 'approved', data: userData = {}, hitlNodeId } = req.body || {};
+
+  // ── Debug (in-process) executions have no persisted record — resume here ──
+  const pausedDebug = pausedDebugExecutions.get(executionId);
+  if (pausedDebug) {
+    pausedDebugExecutions.delete(executionId);
+    const { flow, input, context, savedOutputs, hitlNodeId: pauseNodeId, buttons, sandboxExecutionId, sandboxManager } = pausedDebug;
+    const validDecisions = (buttons || [])
+      .map((b: any) => b?.value)
+      .filter((v: unknown): v is string => typeof v === 'string' && v.length > 0);
+    if (validDecisions.length > 0 && !validDecisions.includes(decision)) {
+      sandboxManager.teardown(sandboxExecutionId).catch(() => {});
+      res.status(400).json({ error: `Invalid decision. Valid options: ${validDecisions.join(', ')}` });
+      return;
+    }
+    const resumeExecutor = new FlowExecutor();
+    try {
+      const result = await resumeExecutor.execute(
+        flow,
+        input,
+        // No live SSE stream for the resumed run — the overlay renders from
+        // the approve response (steps + final output) instead.
+        async () => {},
+        context,
+        {
+          replayFrom: pauseNodeId,
+          replayOutputs: { ...savedOutputs, [`${pauseNodeId}:__approved`]: { decision, feedback } },
+          initialIteration: (savedOutputs as any)?._nextIteration ?? 1,
+        },
+      );
+      sandboxManager.teardown(sandboxExecutionId).catch(() => {});
+      res.json({ status: 'completed', output: result.output, steps: result.steps });
+      return;
+    } catch (err: unknown) {
+      // Another HITL node paused — park the new pause state and tell the
+      // overlay to show the next approval card.
+      if (err instanceof HitlPauseError) {
+        const cfg = (flow.nodes || []).find((n: any) => n.id === err.nodeId)?.data?.config || {};
+        pausedDebugExecutions.set(executionId, {
+          ...pausedDebug,
+          savedOutputs: err.savedOutputs || savedOutputs,
+          hitlNodeId: err.nodeId,
+          buttons: err.buttons || [],
+          prompt: err.prompt || 'Waiting for approval',
+          allowFeedback: (cfg as any).allowFeedback !== false,
+        });
+        res.json({ status: 'paused', executionId, nodeId: err.nodeId, prompt: err.prompt, buttons: err.buttons });
+        return;
+      }
+      sandboxManager.teardown(sandboxExecutionId).catch(() => {});
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ status: 'failed', error: message });
+      return;
+    }
+  }
 
   const [exec] = await db.select().from(executions).where(eq(executions.id, executionId));
   if (!exec) { res.status(404).json({ error: 'Execution not found' }); return; }
@@ -707,6 +792,15 @@ router.delete('/executions/:executionId', requirePermission('execution:approve')
 
 router.post('/executions/:executionId/reject', asyncHandler(async (req, res) => {
   const executionId = req.params.executionId as string;
+
+  // Debug (in-process) executions: nothing to persist — tear down and ack.
+  const pausedDebug = pausedDebugExecutions.get(executionId);
+  if (pausedDebug) {
+    pausedDebugExecutions.delete(executionId);
+    pausedDebug.sandboxManager.teardown(pausedDebug.sandboxExecutionId).catch(() => {});
+    res.json({ status: 'rejected' });
+    return;
+  }
 
   const [exec] = await db.select().from(executions).where(eq(executions.id, executionId));
   if (!exec) { res.status(404).json({ error: 'Execution not found' }); return; }

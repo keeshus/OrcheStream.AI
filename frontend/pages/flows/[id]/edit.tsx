@@ -39,6 +39,9 @@ export default function FlowEditPage() {
   const router = useRouter();
   const { id } = router.query;
   const [flow, setFlow] = useState<any>(null);
+  // Set after createDraftFlow resolves: the follow-up flow GET (triggered by
+  // the router.replace) is redundant and would clobber a fresh rename.
+  const skipNextFlowFetchRef = useRef(false);
   const [isNew, setIsNew] = useState(false);
   const [nodes, setNodes] = useState<any[]>([]);
   const [edges, setEdges] = useState<any[]>([]);
@@ -56,6 +59,30 @@ export default function FlowEditPage() {
   const [now, setNow] = useState(Date.now());
   const [personalApiKey, setPersonalApiKey] = useState<string | null>(null);
   const [showKeyModal, setShowKeyModal] = useState(false);
+  // A freshly-created API key may arrive while another modal is open — defer
+  // the pop until the user's current interaction (config modal, settings,
+  // debug overlay) is done instead of covering it.
+  const [pendingKeyModal, setPendingKeyModal] = useState(false);
+
+  const maybeShowKeyModal = useCallback(() => {
+    if (document.querySelector('[data-co-pilot-modal]')) {
+      setPendingKeyModal(true);
+      return;
+    }
+    setShowKeyModal(true);
+  }, []);
+
+  useEffect(() => {
+    if (!pendingKeyModal) return;
+    const t = setInterval(() => {
+      if (!document.querySelector('[data-co-pilot-modal]')) {
+        setPendingKeyModal(false);
+        setShowKeyModal(true);
+        clearInterval(t);
+      }
+    }, 300);
+    return () => clearInterval(t);
+  }, [pendingKeyModal]);
 
   useEffect(() => {
     const interval = setInterval(() => setNow(Date.now()), 1000);
@@ -225,6 +252,10 @@ export default function FlowEditPage() {
           setFlow(created);
           setNodes(created.nodes || []);
           setEdges(created.edges || []);
+          // The create response is authoritative — skip the follow-up GET so
+          // it cannot clobber a rename made in the header right after load
+          // (the GET would otherwise revert the name to the draft name).
+          skipNextFlowFetchRef.current = true;
           router.replace(`/flows/${created.id}/edit`);
         })
         .catch(() => {
@@ -243,6 +274,10 @@ export default function FlowEditPage() {
       return;
     }
     api.flows.get(id).then((f) => {
+      if (skipNextFlowFetchRef.current) {
+        skipNextFlowFetchRef.current = false;
+        return;
+      }
       setFlow(f);
       const raw = f.nodes || [];
       const ordered = [...raw.filter((n: any) => n.type === 'parallel'), ...raw.filter((n: any) => n.type !== 'parallel')];
@@ -285,7 +320,7 @@ export default function FlowEditPage() {
       setFlow(created);
       if (created.personalApiKey?.rawKey) {
         setPersonalApiKey(created.personalApiKey.rawKey);
-        setShowKeyModal(true);
+        maybeShowKeyModal();
       }
       router.replace(`/flows/${created.id}/edit`);
     } else {
@@ -293,7 +328,7 @@ export default function FlowEditPage() {
       setFlow(updated);
       if (updated.personalApiKey?.rawKey) {
         setPersonalApiKey(updated.personalApiKey.rawKey);
-        setShowKeyModal(true);
+        maybeShowKeyModal();
       }
     }
   }, [flow, router, nodes, isNew]);
@@ -501,7 +536,13 @@ export default function FlowEditPage() {
 
   const saveFlowSettings = useCallback(async (extraFields?: Record<string, unknown>) => {
     if (!flow || isNew) return;
-    const { name, description, flow_context, group_id } = flowSettingsDraft;
+    // The draft state may not have committed yet when callers invoke this
+    // right after setFlowSettingsDraft — merge the explicitly-passed fields
+    // so group_id/description/flow_context changes are never overwritten by
+    // the stale draft (previously the flow state kept group_id null and the
+    // editor Save then persisted the wrong value).
+    const merged = { ...flowSettingsDraft, ...extraFields };
+    const { name, description, flow_context, group_id } = merged;
     setFlow((prev: any) => ({ ...prev, name, description, flow_context, group_id: group_id || null, envVars: flowEnvVars }));
     await api.flows.update(flow.id, { name, description, flow_context, group_id: group_id || null, envVars: flowEnvVars, ...extraFields });
   }, [flow, flowSettingsDraft, flowEnvVars]);
@@ -855,6 +896,7 @@ export default function FlowEditPage() {
                               if (flow.id && !isNew) {
                                 await api.flows.update(flow.id, { envVars: updated }).catch(() => {});
                               }
+                              setFlow((prev: any) => (prev ? { ...prev, envVars: updated } : prev));
                             }}
                             className="p-1 text-on-surface-variant hover:text-error rounded text-xs"
                           ><Icon name="delete" className="text-sm" /></button>
@@ -919,6 +961,10 @@ export default function FlowEditPage() {
                       if (flow.id && !isNew) {
                         await api.flows.update(flow.id, { envVars: updated }).catch(() => {});
                       }
+                      // Keep the flow state in sync — otherwise the editor's
+                      // Save (which spreads the flow object) overwrites the
+                      // just-persisted env vars with the stale list.
+                      setFlow((prev: any) => (prev ? { ...prev, envVars: updated } : prev));
                     }}
                     className="m3-button text-xs shrink-0"
                   ><Icon name="add" className="text-xs" /></button>

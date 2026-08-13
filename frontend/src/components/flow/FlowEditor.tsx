@@ -93,15 +93,21 @@ function FlowEditorInner({ initialNodes = [], initialEdges = [], onNodesChange, 
     const serialized = JSON.stringify({ nodes: initialNodes, edges: initialEdges });
     if (serialized !== serializedRef.current) {
       serializedRef.current = serialized;
+      // The parent receives canvas changes via a debounced rAF propagation,
+      // so on a config-driven re-render here its initialEdges can be stale
+      // and would wipe edges created moments earlier. Preserve canvas-local
+      // edges the parent hasn't received yet; the propagation will carry
+      // them up.
+      const pendingEdges = edges.filter(e => !initialEdges.some(ie => ie.id === e.id));
       setNodes(initialNodes);
-      setEdges(initialEdges);
+      setEdges(pendingEdges.length > 0 ? [...initialEdges, ...pendingEdges] : initialEdges);
       // Force handle re-registration for nodes with dynamic handle counts (branch)
       const branchIds = initialNodes.filter(n => n.type === 'condition' && n.data?.config?.outputLabels?.length > 0).map(n => n.id);
       if (branchIds.length > 0) {
         requestAnimationFrame(() => { for (const id of branchIds) updateNodeInternals(id); });
       }
     }
-  }, [initialNodes, initialEdges, updateNodeInternals]);
+  }, [initialNodes, initialEdges, edges, updateNodeInternals]);
 
   // Expose live canvas state for Co-Pilot tools
   useEffect(() => {
