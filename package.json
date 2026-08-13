@@ -10,7 +10,9 @@
     "sidecar"
   ],
   "scripts": {
-    "dev": "concurrently -k -p \"[{name}]\" -n \"backend,worker,frontend\" -c \"blue,green,magenta\" \"npm run backend:dev\" \"wait-on http://localhost:3001/api/health && npm run worker:dev\" \"wait-on http://localhost:3001/api/health && npm run frontend:dev\"",
+    "dev": "bash scripts/dev.sh",
+    "dev:services": "concurrently -k -p \"[{name}]\" -n \"backend,worker,frontend\" -c \"blue,green,magenta\" \"npm run backend:dev\" \"wait-on http://localhost:3001/api/health && npm run worker:dev\" \"wait-on http://localhost:3001/api/health && npm run dev -w frontend -- -p 3002\"",
+    "dev:down": "bash scripts/dev-down.sh",
     "backend": "npm run start -w backend",
     "backend:dev": "tsx watch --env-file=.env backend/src/index.ts",
     "backend:build": "npm run build -w backend",
