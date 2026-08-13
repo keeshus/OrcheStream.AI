@@ -514,7 +514,7 @@ export function NodeConfigModal({
           )}
 
           {node.data.type === 'ai-action' && (
-            <AIActionConfig config={node.data.config} onChange={onConfigChange} />
+            <AIActionConfig config={node.data.config} onChange={onConfigChange} suggestions={{ upstreamLabels, nodes, edges, nodeId: node.id }} flow={flow} />
           )}
 
           {node.data.type === 'http' && (
