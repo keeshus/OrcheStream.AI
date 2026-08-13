@@ -1,52 +1,42 @@
 import { test, expect } from '@playwright/test';
-import { createFlow, deleteFlow, uniqueFlowName } from './helpers/api';
+import { deleteFlow, uniqueFlowName } from './helpers/api';
+import {
+  createFlowViaUi, addNode, configureNode, closeConfig, fillField, connect,
+  moveNodeToSlot, saveFlow, runFlow, debugOverlay, expandStep,
+} from './helpers/flow-builder';
 
-const API_URL = process.env.E2E_API_URL || 'http://localhost:3001/api';
-
-const overlay = (page: any) => page.getByTestId('debug-overlay');
-
-async function createCodeFlow(request: any, code: string) {
-  const res = await createFlow(request, {
-    name: uniqueFlowName('Debug Code Flow'),
-    nodes: [
-      { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Trigger', type: 'trigger', config: { triggerType: 'manual' } } },
-      { id: 'c1', type: 'code', position: { x: 400, y: 0 }, data: { label: 'Compute', type: 'code', config: { code } } },
-      { id: 'o1', type: 'output', position: { x: 800, y: 0 }, data: { label: 'Output', type: 'output', config: {} } },
-    ],
-    edges: [
-      { id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'c1', targetHandle: 'input-0' },
-      { id: 'e2', source: 'c1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' },
-    ],
-  });
-  return res.json();
-}
-
-async function expandStep(page: any, label: string) {
-  await overlay(page).getByRole('button').filter({ hasText: label }).click();
-}
+const overlay = (page: any) => debugOverlay(page);
 
 test.describe('Debug run', () => {
-  let flowId: string;
+  let flowId: string | undefined;
 
-  test.beforeEach(async ({ page, request }) => {
-    const res = await createFlow(request, {
-      name: uniqueFlowName('Debug Run Test'),
-      nodes: [
-        { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Trigger', type: 'trigger', config: { triggerType: 'manual' } } },
-        { id: 'o1', type: 'output', position: { x: 400, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: ['trigger.message'] } } },
-      ],
-      edges: [{ id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' }],
-    });
-    const flow = await res.json();
-    flowId = flow.id;
-    await page.goto(`/flows/${flowId}/edit`);
+  test.beforeEach(async ({ page }) => {
+    flowId = await createFlowViaUi(page, uniqueFlowName('Debug Run Test'));
   });
 
   test.afterEach(async ({ request }) => {
-    if (flowId) {
-      await deleteFlow(request, flowId).catch(() => {});
-    }
+    if (flowId) await deleteFlow(request, flowId).catch(() => {});
+    flowId = undefined;
   });
+
+  /** Build a trigger → code → output flow through the editor UI. */
+  async function buildCodeFlow(page: any, code: string) {
+    await configureNode(page, 'Trigger', 'Trigger');
+    await closeConfig(page);
+    await moveNodeToSlot(page, 'Trigger', -1, 0);
+    const c1 = await addNode(page, 'code');
+    await moveNodeToSlot(page, c1, 0, 0);
+    await configureNode(page, c1, 'Compute');
+    await fillField(page, 'JavaScript Code', code);
+    await closeConfig(page);
+    const o1 = await addNode(page, 'output');
+    await moveNodeToSlot(page, o1, 1, 0);
+    await configureNode(page, o1, 'Output');
+    await closeConfig(page);
+    await connect(page, 'Trigger', 'output-0', 'Compute', 'input-0');
+    await connect(page, 'Compute', 'output-0', 'Output', 'input-0');
+    await saveFlow(page);
+  }
 
   test('debug button is visible on the editor', async ({ page }) => {
     await page.getByTestId('flow-canvas').waitFor({ state: 'visible', timeout: 5000 });
@@ -60,13 +50,7 @@ test.describe('Debug run', () => {
   });
 
   test('runs a simple trigger → output flow and completes', async ({ page }) => {
-    await page.getByTestId('flow-canvas').waitFor({ state: 'visible', timeout: 5000 });
-    await page.getByTestId('debug-btn').click();
-    await expect(page.getByTestId('debug-run-btn')).toBeVisible({ timeout: 5000 });
-
-    // Fill the manual trigger input so the output node has a value to return
-    await page.getByPlaceholder(/Enter the message to send to the flow/).fill('hello-debug');
-    await page.getByTestId('debug-run-btn').click();
+    await runFlow(page, 'hello-debug');
 
     // Execution completes and the output node step shows a completed status
     await expect(overlay(page).getByText('Completed').first()).toBeVisible({ timeout: 20000 });
@@ -74,65 +58,43 @@ test.describe('Debug run', () => {
     await expect(overlay(page).getByText('hello-debug').first()).toBeVisible();
   });
 
-  test('shows step output values from a code node', async ({ page, request }) => {
-    const flow = await createCodeFlow(request, 'return { value: 42 };');
-    await page.goto(`/flows/${flow.id}/edit`);
-    await page.getByTestId('flow-canvas').waitFor({ state: 'visible', timeout: 10000 });
-    await page.getByTestId('debug-btn').click();
-    await page.getByTestId('debug-run-btn').click();
+  test('shows step output values from a code node', async ({ page }) => {
+    await buildCodeFlow(page, 'return { value: 42 };');
+    await runFlow(page);
 
     await expect(overlay(page).getByText('Completed').first()).toBeVisible({ timeout: 20000 });
 
     // Expand the Compute step card and assert the computed output is shown
     await expandStep(page, 'Compute');
     await expect(overlay(page).getByText(/"value": 42/).first()).toBeVisible({ timeout: 5000 });
-
-    await deleteFlow(request, flow.id);
   });
 
-  test('steps appear in execution order', async ({ page, request }) => {
-    const flow = await createCodeFlow(request, 'return input;');
-    await page.goto(`/flows/${flow.id}/edit`);
-    await page.getByTestId('flow-canvas').waitFor({ state: 'visible', timeout: 10000 });
-    await page.getByTestId('debug-btn').click();
-    await page.getByTestId('debug-run-btn').click();
+  test('steps appear in execution order', async ({ page }) => {
+    await buildCodeFlow(page, 'return input;');
+    await runFlow(page);
 
     await expect(overlay(page).getByText('Completed').first()).toBeVisible({ timeout: 20000 });
 
-    // Step cards are rendered in topological execution order: t1 → c1 → o1
+    // Step cards are rendered in topological execution order: Trigger → Compute → Output
     const labels = await overlay(page).locator('span.text-sm.font-medium').allTextContents();
     expect(labels).toEqual(['Trigger', 'Compute', 'Output']);
-
-    await deleteFlow(request, flow.id);
   });
 
-  test('debug input message is used by the flow', async ({ page, request }) => {
-    const flow = await createCodeFlow(request, 'return { received: input.message };');
-    await page.goto(`/flows/${flow.id}/edit`);
-    await page.getByTestId('flow-canvas').waitFor({ state: 'visible', timeout: 10000 });
-    await page.getByTestId('debug-btn').click();
-    await expect(page.getByTestId('debug-run-btn')).toBeVisible({ timeout: 5000 });
-
-    // Edit the trigger input in the debug panel
-    await page.getByPlaceholder(/Enter the message to send to the flow/).fill('debug-hello-42');
-    await page.getByTestId('debug-run-btn').click();
+  test('debug input message is used by the flow', async ({ page }) => {
+    await buildCodeFlow(page, 'return { received: input.message };');
+    await runFlow(page, 'debug-hello-42');
     await expect(overlay(page).getByText('Completed').first()).toBeVisible({ timeout: 20000 });
 
     // The code node received the filled message as input
     await expandStep(page, 'Compute');
     await expect(overlay(page).getByText('debug-hello-42').first()).toBeVisible({ timeout: 5000 });
-
-    await deleteFlow(request, flow.id);
   });
 
-  test('code node errors are displayed in the panel', async ({ page, request }) => {
+  test('code node errors are displayed in the panel', async ({ page }) => {
     // A real throwing code node: the sandbox reports a non-zero exit code, the step
     // fails, and the error text (with the original exception) surfaces in the panel.
-    const flow = await createCodeFlow(request, 'throw new Error("boom from code node");');
-    await page.goto(`/flows/${flow.id}/edit`);
-    await page.getByTestId('flow-canvas').waitFor({ state: 'visible', timeout: 10000 });
-    await page.getByTestId('debug-btn').click();
-    await page.getByTestId('debug-run-btn').click();
+    await buildCodeFlow(page, 'throw new Error("boom from code node");');
+    await runFlow(page);
 
     // Panel status flips to Failed
     await expect(overlay(page).getByText('Failed').first()).toBeVisible({ timeout: 20000 });
@@ -140,7 +102,5 @@ test.describe('Debug run', () => {
     // The failing step shows the error message once expanded
     await expandStep(page, 'Compute');
     await expect(overlay(page).getByText(/boom from code node/).first()).toBeVisible({ timeout: 5000 });
-
-    await deleteFlow(request, flow.id);
   });
 });

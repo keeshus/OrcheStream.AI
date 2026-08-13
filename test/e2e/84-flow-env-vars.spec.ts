@@ -1,6 +1,11 @@
 import { test, expect } from '@playwright/test';
 import { createFlow, deleteFlow, uniqueFlowName } from './helpers/api';
 import { getAuthCookie } from './helpers/auth';
+import {
+  createFlowViaUi, addNode, configureNode, closeConfig, selectOption,
+  fillFieldByPlaceholder, connect, moveNodeToSlot, saveFlow, runFlow,
+  debugOverlay, expandStep, expectCompleted,
+} from './helpers/flow-builder';
 
 const API_URL = process.env.E2E_API_URL || 'http://localhost:3001/api';
 const cookie = getAuthCookie() || undefined;
@@ -30,6 +35,55 @@ test.describe('Flow env vars and secret types', () => {
     for (const id of cleanupGroupIds) { await request.delete(`${API_URL}/groups/${id}`).catch(() => {}); }
     cleanupFlowIds.length = cleanupSecretIds.length = cleanupVaultIds.length = cleanupGroupIds.length = 0;
   });
+
+  /**
+   * Build a trigger → llm-agent → output flow via the editor UI, setting the
+   * flow's env var (and optional group) through the Flow Settings modal.
+   */
+  async function buildEnvLLMFlow(page: any, request: any, name: string, envVar: { name: string; value: string; type: 'static' | 'core_secret' | 'cyberark' }, groupId?: string, groupName?: string, prompt?: string) {
+    const flowId = await createFlowViaUi(page, name);
+    await page.getByTestId('flow-settings-btn').click();
+    const settings = page.locator('[data-co-pilot-modal="flow-settings"]');
+    await expect(settings).toBeVisible({ timeout: 5000 });
+    if (groupId) {
+      await page.getByLabel('Group').click();
+      await page.getByRole('button', { name: groupName }).click();
+      await expect(page.getByLabel(`Group: ${groupName}`)).toBeVisible({ timeout: 5000 });
+    }
+    await settings.getByPlaceholder('Variable name').fill(envVar.name);
+    await settings.locator('select').filter({ hasText: 'Static' }).selectOption(envVar.type);
+    if (envVar.type === 'static') {
+      await settings.getByPlaceholder('Value').last().fill(envVar.value);
+    } else {
+      // The secret options load asynchronously once the group scope is known
+      await expect(settings.locator('select').nth(1)).toContainText(envVar.value, { timeout: 10000 });
+      await settings.locator('select').nth(1).selectOption(envVar.value);
+    }
+    await settings.getByRole('button').filter({ has: page.locator('.material-symbols-outlined', { hasText: 'add' }) }).last().click();
+    await expect(settings.getByText(envVar.name, { exact: true }).first()).toBeVisible({ timeout: 5000 });
+    await settings.getByRole('button').filter({ has: page.locator('.material-symbols-outlined', { hasText: 'close' }) }).first().click();
+    await expect(settings).not.toBeVisible();
+
+    await configureNode(page, 'Trigger', 'Trigger');
+    await closeConfig(page);
+    await moveNodeToSlot(page, 'Trigger', -1, 0);
+    const l = await addNode(page, 'llm-agent');
+    await moveNodeToSlot(page, l, 0, 0);
+    await configureNode(page, l, 'Assistant');
+    await selectOption(page, 'LLM Endpoint', /E2E Mock LLM Flow Env/);
+    await selectOption(page, 'Model', 'mock-gpt-4');
+    await fillFieldByPlaceholder(page, 'You are a helpful assistant... Type {{ for field suggestions', prompt || 'ECHO_SYSTEM_PROMPT');
+    await selectOption(page, 'Response Format', 'Plain Text');
+    await closeConfig(page);
+    const o = await addNode(page, 'output');
+    await moveNodeToSlot(page, o, 1, 0);
+    await configureNode(page, o, 'Output');
+    await closeConfig(page);
+    await connect(page, 'Trigger', 'output-0', 'Assistant', 'input-0');
+    await connect(page, 'Assistant', 'output-0', 'Output', 'input-0');
+    await saveFlow(page);
+    return flowId;
+  }
 
   // ═══════════════════════════════════════════════════════════════
   // ─── Flow env vars in Flow Settings modal ─────────────────────
@@ -105,38 +159,19 @@ test.describe('Flow env vars and secret types', () => {
   // ─── Flow env var resolution during execution ─────────────────
   // ═══════════════════════════════════════════════════════════════
 
-  test('{{env.FLOW_VAR}} resolves during execution', async ({ request }) => {
+  test('{{env.FLOW_VAR}} resolves during execution', async ({ page, request }) => {
     test.skip(!mockEndpointId, 'Mock LLM endpoint not available');
 
-    const flowRes = await request.post(`${API_URL}/flows`, {
-      data: {
-        name: uniqueFlowName('Flow-Env-Resolve'),
-        envVars: [{ name: 'DB_HOST', value: 'db.internal', type: 'static' }],
-        nodes: [
-          { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Trigger', type: 'trigger', config: { triggerType: 'manual' } } },
-          { id: 'l1', type: 'llm-agent', position: { x: 300, y: 0 }, data: { label: 'Assistant', type: 'llm-agent', config: { endpointId: mockEndpointId, model: 'mock-gpt-4', systemPrompt: 'ECHO_SYSTEM_PROMPT\nThe DB is at: {{env.DB_HOST}}', temperature: 0.7, maxTokens: 1024, responseFormat: 'text' } } },
-          { id: 'o1', type: 'output', position: { x: 600, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: ['Assistant.content'] } } },
-        ],
-        edges: [
-          { id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'l1', targetHandle: 'input-0' },
-          { id: 'e2', source: 'l1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' },
-        ],
-      },
-    });
-    expect(flowRes.ok()).toBe(true);
-    const flow = await flowRes.json();
-    cleanupFlowIds.push(flow.id);
+    const flowId = await buildEnvLLMFlow(page, request, uniqueFlowName('Flow-Env-Resolve'), {
+      name: 'DB_HOST', value: 'db.internal', type: 'static',
+    }, undefined, undefined, 'ECHO_SYSTEM_PROMPT\nThe DB is at: {{env.DB_HOST}}');
+    cleanupFlowIds.push(flowId);
 
-    const { debugExecute } = await import('./helpers/stream');
-    const events = await debugExecute(flow.id, { message: 'test' }, cookie);
-
-    const completed = events.find(e => e.type === 'execution.completed');
-    expect(completed).toBeDefined();
-
-    const output = completed?.data?.output || {};
-    const outputStr = typeof output === 'string' ? output : JSON.stringify(output);
-    expect(outputStr).toContain('db.internal');
-    expect(outputStr).not.toContain('{{env.DB_HOST}}');
+    await runFlow(page, 'test');
+    await expectCompleted(page, 30000);
+    await expandStep(page, 'Assistant');
+    await expect(debugOverlay(page).getByText('db.internal').first()).toBeVisible({ timeout: 10000 });
+    await expect(debugOverlay(page).getByText('{{env.DB_HOST}}')).toHaveCount(0);
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -146,7 +181,7 @@ test.describe('Flow env vars and secret types', () => {
   test('core_secret env var references a Core secret during execution', async ({ page, request }) => {
     test.skip(!mockEndpointId, 'Mock LLM endpoint not available');
 
-    // Create an app-level Core secret
+    // Create an app-level Core secret (fixture)
     const secRes = await request.post(`${API_URL}/secrets`, {
       data: { name: 'MY_API_KEY', value: 'sk-12345', scope: 'app' },
     });
@@ -154,37 +189,16 @@ test.describe('Flow env vars and secret types', () => {
     const secret = await secRes.json();
     cleanupSecretIds.push(secret.id);
 
-    // Create a flow with a core_secret type env var
-    const flowRes = await request.post(`${API_URL}/flows`, {
-      data: {
-        name: uniqueFlowName('CoreSecret-Resolve'),
-        envVars: [{ name: 'API_KEY', value: 'MY_API_KEY', type: 'core_secret' }],
-        nodes: [
-          { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Trigger', type: 'trigger', config: { triggerType: 'manual' } } },
-          { id: 'l1', type: 'llm-agent', position: { x: 300, y: 0 }, data: { label: 'Assistant', type: 'llm-agent', config: { endpointId: mockEndpointId, model: 'mock-gpt-4', systemPrompt: 'ECHO_SYSTEM_PROMPT\nThe API key is: {{env.API_KEY}}', temperature: 0.7, maxTokens: 1024, responseFormat: 'text' } } },
-          { id: 'o1', type: 'output', position: { x: 600, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: ['Assistant.content'] } } },
-        ],
-        edges: [
-          { id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'l1', targetHandle: 'input-0' },
-          { id: 'e2', source: 'l1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' },
-        ],
-      },
-    });
-    expect(flowRes.ok()).toBe(true);
-    const flow = await flowRes.json();
-    cleanupFlowIds.push(flow.id);
+    const flowId = await buildEnvLLMFlow(page, request, uniqueFlowName('CoreSecret-Resolve'), {
+      name: 'API_KEY', value: 'MY_API_KEY', type: 'core_secret',
+    }, undefined, undefined, 'ECHO_SYSTEM_PROMPT\nThe API key is: {{env.API_KEY}}');
+    cleanupFlowIds.push(flowId);
 
-    const { debugExecute } = await import('./helpers/stream');
-    const events = await debugExecute(flow.id, { message: 'test' }, cookie);
-
-    const completed = events.find(e => e.type === 'execution.completed');
-    expect(completed).toBeDefined();
-
-    const output = completed?.data?.output || {};
-    const outputStr = typeof output === 'string' ? output : JSON.stringify(output);
-    // The core_secret should be resolved to the actual secret value
-    expect(outputStr).toContain('sk-12345');
-    expect(outputStr).not.toContain('{{env.API_KEY}}');
+    await runFlow(page, 'test');
+    await expectCompleted(page, 30000);
+    await expandStep(page, 'Assistant');
+    await expect(debugOverlay(page).getByText('sk-12345').first()).toBeVisible({ timeout: 10000 });
+    await expect(debugOverlay(page).getByText('{{env.API_KEY}}')).toHaveCount(0);
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -194,13 +208,12 @@ test.describe('Flow env vars and secret types', () => {
   test('cyberark env var references a CyberArk vault', async ({ page, request }) => {
     test.skip(!mockEndpointId, 'Mock LLM endpoint not available');
 
-    // Create a group first (vaults require a group)
+    // Group + vault fixtures (vaults are bound to groups via API)
     const groupRes = await request.post(`${API_URL}/groups`, { data: { name: `CyberArk-Env-Group-${Date.now()}` } });
     expect(groupRes.status()).toBe(201);
     const group = await groupRes.json();
     cleanupGroupIds.push(group.id);
 
-    // Create a Conjur vault bound to the group
     const vRes = await request.post(`${API_URL}/secret-vaults`, {
       data: { name: 'E2E CyberArk Env', vaultType: 'cyberark', baseUrl: 'http://mock-cyberark-e2e:3005', account: 'conjur', login: 'host/myapp', apiKey: 'myapp-api-key-456', groupId: group.id },
     });
@@ -208,46 +221,31 @@ test.describe('Flow env vars and secret types', () => {
     const vault = await vRes.json();
     cleanupVaultIds.push(vault.id);
 
-    // Test connection
     await request.post(`${API_URL}/secret-vaults/${vault.id}/test`);
-
-    // Bind the vault to the group
     await request.put(`${API_URL}/group-vault-config/${group.id}`, {
       data: { vaultId: vault.id, enabled: true },
     });
 
-    // Create a flow in that group with a cyberark type env var
-    const flowRes = await request.post(`${API_URL}/flows`, {
-      data: {
-        name: uniqueFlowName('CyberArk-Env-Resolve'),
-        group_id: group.id,
-        envVars: [{ name: 'DB_PASS', value: 'prod/db/password', type: 'cyberark' }],
-        nodes: [
-          { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Trigger', type: 'trigger', config: { triggerType: 'manual' } } },
-          { id: 'l1', type: 'llm-agent', position: { x: 300, y: 0 }, data: { label: 'Assistant', type: 'llm-agent', config: { endpointId: mockEndpointId, model: 'mock-gpt-4', systemPrompt: 'ECHO_SYSTEM_PROMPT\nThe DB password is: {{env.DB_PASS}}', temperature: 0.7, maxTokens: 1024, responseFormat: 'text' } } },
-          { id: 'o1', type: 'output', position: { x: 600, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: ['Assistant.content'] } } },
-        ],
-        edges: [
-          { id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'l1', targetHandle: 'input-0' },
-          { id: 'e2', source: 'l1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' },
-        ],
-      },
+    // The editor's CyberArk dropdown lists group-scoped cyberark SECRET rows —
+    // create the reference row (fixture) so the UI can select it.
+    const secRowRes = await request.post(`${API_URL}/secrets`, {
+      data: { name: 'DB_PASS', value: '', scope: 'group', scopeId: group.id, secretType: 'cyberark', referencePath: 'prod/db/password' },
     });
-    expect(flowRes.ok()).toBe(true);
-    const flow = await flowRes.json();
-    cleanupFlowIds.push(flow.id);
+    expect(secRowRes.ok()).toBe(true);
+    const secRow = await secRowRes.json();
+    cleanupSecretIds.push(secRow.id);
 
-    const { debugExecute } = await import('./helpers/stream');
-    const events = await debugExecute(flow.id, { message: 'test' }, cookie);
+    const flowId = await buildEnvLLMFlow(page, request, uniqueFlowName('CyberArk-Env-Resolve'), {
+      name: 'DB_PASS', value: 'prod/db/password', type: 'cyberark',
+    }, group.id, group.name, 'ECHO_SYSTEM_PROMPT\nThe DB password is: {{env.DB_PASS}}');
+    cleanupFlowIds.push(flowId);
 
-    const completed = events.find(e => e.type === 'execution.completed');
-    expect(completed).toBeDefined();
-
-    const output = completed?.data?.output || {};
-    const outputStr = typeof output === 'string' ? output : JSON.stringify(output);
+    await runFlow(page, 'test');
+    await expectCompleted(page, 30000);
+    await expandStep(page, 'Assistant');
     // The mock CyberArk returns "sup3r-s3cr3t-db-pass!" for prod/db/password
-    expect(outputStr).toContain('sup3r-s3cr3t-db-pass!');
-    expect(outputStr).not.toContain('{{env.DB_PASS}}');
+    await expect(debugOverlay(page).getByText('sup3r-s3cr3t-db-pass!').first()).toBeVisible({ timeout: 15000 });
+    await expect(debugOverlay(page).getByText('{{env.DB_PASS}}')).toHaveCount(0);
   });
 
   // ═══════════════════════════════════════════════════════════════

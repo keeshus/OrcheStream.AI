@@ -20,6 +20,7 @@ export default defineConfig({
   },
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:3000',
+    viewport: { width: 1920, height: 1080 },
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },

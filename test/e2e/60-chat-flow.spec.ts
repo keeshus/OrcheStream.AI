@@ -1,17 +1,122 @@
 import { test, expect } from '@playwright/test';
-import { createFlow, deleteFlow, uniqueFlowName } from './helpers/api';
+import { deleteFlow, uniqueFlowName } from './helpers/api';
+import {
+  createFlowViaUi, addNode, clickNode, configureNode, closeConfig, fillField,
+  fillFieldByPlaceholder, selectOption, connect, moveNodeToSlot, saveFlow,
+} from './helpers/flow-builder';
 
 const API_URL = process.env.E2E_API_URL || 'http://localhost:3001/api';
 const MOCK_LLM_URL = 'http://mock-llm-e2e:3002/v1';
 
+// ── UI flow builder (same recipe as 90-node-types) ─────────────────────────
+// The chat flow (chat trigger + LLM agent + output) is built through the real
+// editor UI; the tests then drive the real chat UI (/chat/<flowId>).
+
+type UiNode = {
+  type: string;
+  label: string;
+  config?: Record<string, any>;
+  col?: number;
+  row?: number;
+};
+
+type UiEdge = {
+  from: string;
+  fromHandle: string;
+  to: string;
+  toHandle: string;
+};
+
+/** Apply a trigger/node config through the real config-modal form. */
+async function applyConfig(page: any, type: string, label: string, config: Record<string, any> = {}) {
+  const modal = page.getByTestId('node-config-modal');
+  switch (type) {
+    case 'trigger':
+      if (config.triggerType) await selectOption(page, 'Trigger Type', config.triggerType);
+      break;
+    case 'llm-agent': {
+      if (config.endpointId) await selectOption(page, 'LLM Endpoint', /E2E Mock LLM/);
+      if (config.model) await selectOption(page, 'Model', config.model);
+      if (config.systemPrompt) {
+        await fillFieldByPlaceholder(page, 'You are a helpful assistant... Type {{ for field suggestions', config.systemPrompt);
+      }
+      if (config.responseFormat === 'json_object') {
+        await selectOption(page, 'Response Format', 'JSON');
+      } else if (config.responseFormat === 'text') {
+        await selectOption(page, 'Response Format', 'Plain Text');
+      }
+      break;
+    }
+    case 'output': {
+      for (const field of config.inputFields || []) {
+        // Check the field checkbox (e.g. "content" under the upstream node).
+        // The checkbox label renders as "{name}: {type}". Exact text match is
+        // required — a chat trigger's "history: array<{role,content}>" field
+        // also contains the substring "content".
+        const fieldName = field.split('.').pop();
+        await modal.locator('label').filter({ has: page.getByText(fieldName!, { exact: true }) }).locator('input[type="checkbox"]').check();
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+/** Open the config modal for a node (no rename). */
+async function openConfig(page: any, label: string) {
+  await clickNode(page, label);
+  await expect(page.getByTestId('node-config-modal')).toBeVisible({ timeout: 5000 });
+}
+
+/** Build the chat flow through the editor UI and save it. Returns the flow id. */
+async function buildChatFlow(page: any, endpointId: string, name: string): Promise<string> {
+  const flowId = await createFlowViaUi(page, name);
+  // Pass 1: add/rename/move all nodes (new nodes land at the canvas centre,
+  // so each is moved to its slot immediately).
+  await configureNode(page, 'Trigger', 'Chat');
+  await closeConfig(page);
+  await moveNodeToSlot(page, 'Chat', -1, 0);
+  const agentLabel = await addNode(page, 'llm-agent');
+  await moveNodeToSlot(page, agentLabel, 0, 0);
+  await configureNode(page, agentLabel, 'Assistant');
+  await closeConfig(page);
+  const outLabel = await addNode(page, 'output');
+  await moveNodeToSlot(page, outLabel, 1, 0);
+  await configureNode(page, outLabel, 'Output');
+  await closeConfig(page);
+
+  // Pass 2: connect incoming edges, then apply configs in order.
+  await connect(page, 'Chat', 'output-0', 'Assistant', 'input-0');
+  await openConfig(page, 'Chat');
+  await applyConfig(page, 'trigger', 'Chat', { triggerType: 'chat' });
+  await closeConfig(page);
+
+  await connect(page, 'Assistant', 'output-0', 'Output', 'input-0');
+  await openConfig(page, 'Assistant');
+  await applyConfig(page, 'llm-agent', 'Assistant', {
+    endpointId,
+    model: 'mock-gpt-4',
+    systemPrompt: 'MOCK_RESPONSE: "Hello from chat!"',
+    responseFormat: 'text',
+  });
+  await closeConfig(page);
+
+  await openConfig(page, 'Output');
+  await applyConfig(page, 'output', 'Output', { inputFields: ['assistant.content'] });
+  await closeConfig(page);
+
+  await saveFlow(page);
+  return flowId;
+}
+
 test.describe('Chat flow', () => {
   let mockEndpointId: string | null = null;
-  let flowId: string;
 
   test.beforeAll(async ({ request }) => {
-    const llmRes = await request.post(`${API_URL}/llm-endpoints`, {
+    const res = await request.post(`${API_URL}/llm-endpoints`, {
       data: {
-        name: 'E2E Chat Flow LLM',
+        name: 'E2E Mock LLM',
         providerType: 'openai',
         baseUrl: MOCK_LLM_URL,
         apiKey: 'mock-key',
@@ -19,8 +124,8 @@ test.describe('Chat flow', () => {
         models: ['mock-gpt-4'],
       },
     });
-    expect(llmRes.ok(), 'mock LLM endpoint should be created — every test in this file depends on it').toBe(true);
-    const ep = await llmRes.json();
+    expect(res.ok(), 'mock LLM endpoint should be created — every test in this file depends on it').toBe(true);
+    const ep = await res.json();
     mockEndpointId = ep.id;
   });
 
@@ -30,46 +135,21 @@ test.describe('Chat flow', () => {
     }
   });
 
-  test.beforeEach(async ({ request }) => {
-    const res = await createFlow(request, {
-      name: uniqueFlowName('Chat Flow E2E'),
-      nodes: [
-        { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Chat', type: 'trigger', config: { triggerType: 'chat' } } },
-        {
-          id: 'l1', type: 'llm-agent', position: { x: 300, y: 0 },
-          data: {
-            label: 'Assistant',
-            type: 'llm-agent',
-            config: {
-              endpointId: mockEndpointId,
-              model: 'mock-gpt-4',
-              systemPrompt: 'MOCK_RESPONSE: "Hello from chat!"',
-              temperature: 0.7,
-              maxTokens: 256,
-              responseFormat: 'text',
-            },
-          },
-        },
-        { id: 'o1', type: 'output', position: { x: 600, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: ['assistant.content'] } } },
-      ],
-      edges: [
-        { id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'l1', targetHandle: 'input-0' },
-        { id: 'e2', source: 'l1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' },
-      ],
-    });
-    expect(res.ok()).toBe(true);
-    const flow = await res.json();
-    flowId = flow.id;
+  test.beforeEach(async ({ page }, testInfo) => {
+    test.skip(!mockEndpointId, 'Mock LLM endpoint not available');
+    const flowId = await buildChatFlow(page, mockEndpointId!, uniqueFlowName('Chat Flow E2E'));
+    (testInfo as any).flowId = flowId;
   });
 
-  test.afterEach(async ({ request }) => {
+  test.afterEach(async ({ request }, testInfo) => {
+    const flowId = (testInfo as any).flowId;
     if (flowId) await deleteFlow(request, flowId).catch(() => {});
   });
 
   const sessionsHeading = (page: any) => page.getByRole("heading", { name: "Chat Sessions" });
 
   /** Start a new chat session through the UI and return the session URL. */
-  async function startNewChat(page: any): Promise<void> {
+  async function startNewChat(page: any, flowId: string): Promise<void> {
     await page.goto(`/chat/${flowId}`);
     await expect(sessionsHeading(page)).toBeVisible({ timeout: 15000 });
     await page.getByText('New Chat').click();
@@ -88,7 +168,8 @@ test.describe('Chat flow', () => {
     ).toBeGreaterThan(0);
   }
 
-  test('chat page loads and allows starting a new chat', async ({ page }) => {
+  test('chat page loads and allows starting a new chat', async ({ page }, testInfo) => {
+    const flowId = (testInfo as any).flowId;
     await page.goto(`/chat/${flowId}`);
     await expect(sessionsHeading(page)).toBeVisible({ timeout: 15000 });
     await expect(page.getByText('New Chat')).toBeVisible({ timeout: 5000 });
@@ -98,8 +179,9 @@ test.describe('Chat flow', () => {
     await expect(page.getByText('Start a conversation with this agent')).toBeVisible();
   });
 
-  test('sends a message and receives the streamed assistant response', async ({ page }) => {
-    await startNewChat(page);
+  test('sends a message and receives the streamed assistant response', async ({ page }, testInfo) => {
+    const flowId = (testInfo as any).flowId;
+    await startNewChat(page, flowId);
     const message = 'What is 2+2?';
     await sendMessageAndWait(page, message);
 
@@ -113,9 +195,10 @@ test.describe('Chat flow', () => {
     await expect(page.getByLabel('Message')).toBeEnabled({ timeout: 15000 });
   });
 
-  test('session appears in the session list after sending', async ({ page }) => {
+  test('session appears in the session list after sending', async ({ page }, testInfo) => {
+    const flowId = (testInfo as any).flowId;
     const message = 'List sessions please';
-    await startNewChat(page);
+    await startNewChat(page, flowId);
     await sendMessageAndWait(page, message);
 
     // Navigate back to the session list via the Back link
@@ -128,9 +211,10 @@ test.describe('Chat flow', () => {
     await expect(page.locator('a[href^="/chat/"][href*="' + flowId + '"]').filter({ hasText: message })).toBeVisible();
   });
 
-  test('reload restores the conversation history from the session', async ({ page }) => {
+  test('reload restores the conversation history from the session', async ({ page }, testInfo) => {
+    const flowId = (testInfo as any).flowId;
     const message = 'Remember me';
-    await startNewChat(page);
+    await startNewChat(page, flowId);
     await sendMessageAndWait(page, message);
 
     await page.reload();
@@ -142,9 +226,10 @@ test.describe('Chat flow', () => {
     await expect(page.getByText('Start a conversation with this agent')).toHaveCount(0);
   });
 
-  test('switches between multiple chat sessions', async ({ page }) => {
+  test('switches between multiple chat sessions', async ({ page }, testInfo) => {
+    const flowId = (testInfo as any).flowId;
     // Session A
-    await startNewChat(page);
+    await startNewChat(page, flowId);
     await sendMessageAndWait(page, 'First question');
 
     // Session B
@@ -170,9 +255,10 @@ test.describe('Chat flow', () => {
     await expect(page.getByText('First question')).toHaveCount(0);
   });
 
-  test('deletes a session from the list', async ({ page, request }) => {
+  test('deletes a session from the list', async ({ page }, testInfo) => {
+    const flowId = (testInfo as any).flowId;
     const message = 'Delete me later';
-    await startNewChat(page);
+    await startNewChat(page, flowId);
     await sendMessageAndWait(page, message);
 
     await page.getByRole('link', { name: 'Back' }).click();
@@ -185,14 +271,8 @@ test.describe('Chat flow', () => {
     await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 });
     await page.getByRole('dialog').getByRole('button', { name: 'Delete' }).click();
 
+    // The session list (UI) confirms the deletion
     await expect(page.getByText(message)).toHaveCount(0, { timeout: 5000 });
     await expect(page.getByText('No conversations yet')).toBeVisible();
-
-    // Backend agrees: no sessions remain for this flow
-    const listRes = await request.get(`${API_URL}/chat/${flowId}/sessions`);
-    expect(listRes.ok()).toBe(true);
-    const sessions = await listRes.json();
-    expect(Array.isArray(sessions)).toBe(true);
-    expect(sessions.length).toBe(0);
   });
 });

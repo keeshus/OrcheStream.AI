@@ -2,13 +2,82 @@ import { test, expect } from '@playwright/test';
 import { createFlow, deleteFlow, uniqueFlowName } from './helpers/api';
 import { debugExecute, pollExecution } from './helpers/stream';
 import { getAuthCookie } from './helpers/auth';
+import {
+  createFlowViaUi, addNode, configureNode, closeConfig, fillField,
+  fillFieldByPlaceholder, connect, moveNodeToSlot, saveFlow,
+} from './helpers/flow-builder';
 
 const API_URL = process.env.E2E_API_URL || 'http://localhost:3001/api';
 const cookie = getAuthCookie() || undefined;
 
-// ─── Retriever node ─────────────────────────────────────────────
+/** Open the config modal for a node (no rename). */
+async function openConfigLocal(page: any, label: string) {
+  await page.locator('.react-flow__node').filter({ has: page.getByText(label, { exact: true }) }).first().click();
+  await expect(page.getByTestId('node-config-modal')).toBeVisible({ timeout: 5000 });
+}
 
-test.describe('Retriever node — comprehensive', () => {
+// ── UI flow builders (spec-local, mirror 90-node-types) ─────────
+
+/** Build a trigger → hitl → output flow through the editor UI. */
+async function buildHITLFlow(page: any, request: any, name: string, prompt: string, buttons: { label: string; value: string }[]) {
+  const flowId = await createFlowViaUi(page, name);
+  await configureNode(page, 'Trigger', 'Trigger');
+  await closeConfig(page);
+  await moveNodeToSlot(page, 'Trigger', -1, 0);
+  const h = await addNode(page, 'hitl');
+  await moveNodeToSlot(page, h, 0, 0);
+  await configureNode(page, h, 'Gate');
+  const modal = page.getByTestId('node-config-modal');
+  await fillFieldByPlaceholder(page, 'Please review the generated content before proceeding...', prompt);
+  // Custom buttons only render after switching the HITL mode to Custom
+  await modal.getByRole('button', { name: 'Custom', exact: true }).click();
+  for (let i = 0; i < buttons.length; i++) {
+    // The buttons list starts empty — every row must be added explicitly
+    await modal.getByRole('button', { name: '+ Add Button' }).click();
+    await modal.getByLabel('Label').nth(i).fill(buttons[i].label);
+    await modal.getByLabel('Value').nth(i).fill(buttons[i].value);
+  }
+  await closeConfig(page);
+  const o = await addNode(page, 'output');
+  await moveNodeToSlot(page, o, 1, 0);
+  await configureNode(page, o, 'Output');
+  await closeConfig(page);
+  await connect(page, 'Trigger', 'output-0', 'Gate', 'input-0');
+  await connect(page, 'Gate', 'output-0', 'Output', 'input-0');
+  await saveFlow(page);
+  return flowId;
+}
+
+/** Build a trigger → output chat flow through the editor UI. */
+async function buildChatFlow(page: any, request: any, name: string) {
+  const flowId = await createFlowViaUi(page, name);
+  await configureNode(page, 'Trigger', 'Chat');
+  const modal = page.getByTestId('node-config-modal');
+  await modal.locator('[data-field-label="Trigger Type"]').click();
+  await page.getByRole('option', { name: 'Chat' }).first().click();
+  await closeConfig(page);
+  await moveNodeToSlot(page, 'Chat', -1, 0);
+  const o = await addNode(page, 'output');
+  await moveNodeToSlot(page, o, 1, 0);
+  await configureNode(page, o, 'Output');
+  await closeConfig(page);
+  await connect(page, 'Chat', 'output-0', 'Output', 'input-0');
+  // Chat flows require exactly one output field selected before they can save
+  await openConfigLocal(page, 'Output');
+  const modal2 = page.getByTestId('node-config-modal');
+  await modal2.locator('label').filter({ has: page.getByText('message', { exact: true }) }).locator('input[type="checkbox"]').check();
+  await closeConfig(page);
+  await saveFlow(page);
+  return flowId;
+}
+
+// ─── Retriever node ─────────────────────────────────────────────
+// NOTE: kept API-based — Retriever nodes render NO connection handles on the
+// canvas (inputs={0}, tool-output only; wired via the LLM Agent's tool-input
+// "purple dot" instead), so a retriever flow cannot be wired in the editor
+// UI. The retriever CONFIG form is covered in 94-node-type-configs.
+
+test.describe('Retriever node — comprehensive (API-pinned: no canvas handles)', () => {
   let embeddingProviderId: string | null = null;
   let docId: string | null = null;
   let flowId: string | null = null;
@@ -150,6 +219,9 @@ test.describe('Retriever node — comprehensive', () => {
 });
 
 // ─── Approvals page ─────────────────────────────────────────────
+// NOTE: flows are built via the editor UI; the pause/approve cycle itself
+// stays API-based — persisted executions (executeUntilPaused/pollExecution)
+// have no debug-overlay equivalent (the overlay runs in-memory).
 
 test.describe('Approvals page — reject', () => {
   let flowId: string;
@@ -158,24 +230,14 @@ test.describe('Approvals page — reject', () => {
     if (flowId) await deleteFlow(request, flowId).catch(() => {});
   });
 
-  test('POST /api/executions/:executionId/reject rejects execution', async ({ request }) => {
-    const flowRes = await createFlow(request, {
-      name: uniqueFlowName('HITLRejectAPI'),
-      nodes: [
-        { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Trigger', type: 'trigger', config: { triggerType: 'manual' } } },
-        { id: 'h1', type: 'hitl', position: { x: 300, y: 0 }, data: { label: 'Gate', type: 'hitl', config: { prompt: 'Go?', buttons: [{ label: 'Reject', value: 'rejected' }, { label: 'Approve', value: 'approved' }] } } },
-        { id: 'o1', type: 'output', position: { x: 600, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: [] } } },
-      ],
-      edges: [
-        { id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'h1', targetHandle: 'input-0' },
-        { id: 'e2', source: 'h1', sourceHandle: 'output-1', target: 'o1', targetHandle: 'input-0' },
-      ],
-    });
-    const flow = await flowRes.json();
-    flowId = flow.id;
+  test('POST /api/executions/:executionId/reject rejects execution', async ({ page, request }) => {
+    flowId = await buildHITLFlow(page, request, uniqueFlowName('HITLRejectAPI'), 'Go?', [
+      { label: 'Reject', value: 'rejected' },
+      { label: 'Approve', value: 'approved' },
+    ]);
 
     const { executeUntilPaused } = await import('./helpers/stream');
-    const { executionId } = await executeUntilPaused(flow.id, { message: 'test' }, cookie);
+    const { executionId } = await executeUntilPaused(flowId, { message: 'test' }, cookie);
 
     // Reject via API
     const rejectRes = await fetch(`${API_URL}/executions/${executionId}/reject`, {
@@ -190,23 +252,13 @@ test.describe('Approvals page — reject', () => {
   });
 
   test('reject from approvals page shows rejection', async ({ page, request }) => {
-    const flowRes = await createFlow(request, {
-      name: uniqueFlowName('HITLRejectUI'),
-      nodes: [
-        { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Trigger', type: 'trigger', config: { triggerType: 'manual' } } },
-        { id: 'h1', type: 'hitl', position: { x: 300, y: 0 }, data: { label: 'Gate', type: 'hitl', config: { prompt: 'Go?', buttons: [{ label: 'Reject', value: 'rejected' }, { label: 'Approve', value: 'approved' }] } } },
-        { id: 'o1', type: 'output', position: { x: 600, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: [] } } },
-      ],
-      edges: [
-        { id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'h1', targetHandle: 'input-0' },
-        { id: 'e2', source: 'h1', sourceHandle: 'output-1', target: 'o1', targetHandle: 'input-0' },
-      ],
-    });
-    const flow = await flowRes.json();
-    flowId = flow.id;
+    flowId = await buildHITLFlow(page, request, uniqueFlowName('HITLRejectUI'), 'Go?', [
+      { label: 'Reject', value: 'rejected' },
+      { label: 'Approve', value: 'approved' },
+    ]);
 
     const { executeUntilPaused } = await import('./helpers/stream');
-    const { executionId } = await executeUntilPaused(flow.id, { message: 'test' }, cookie);
+    const { executionId } = await executeUntilPaused(flowId, { message: 'test' }, cookie);
 
     // Navigate to approvals page and click the real Reject button (from the HITL config)
     await page.goto('/approvals');
@@ -237,24 +289,13 @@ test.describe('Cancel execution', () => {
     if (flowId) await deleteFlow(request, flowId).catch(() => {});
   });
 
-  test('POST /api/executions/:executionId/cancel cancels running execution', async ({ request }) => {
-    const flowRes = await createFlow(request, {
-      name: uniqueFlowName('CancelTest'),
-      nodes: [
-        { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Trigger', type: 'trigger', config: { triggerType: 'manual' } } },
-        { id: 'h1', type: 'hitl', position: { x: 300, y: 0 }, data: { label: 'Gate', type: 'hitl', config: { prompt: 'Wait', buttons: [{ label: 'Go', value: 'go' }] } } },
-        { id: 'o1', type: 'output', position: { x: 600, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: [] } } },
-      ],
-      edges: [
-        { id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'h1', targetHandle: 'input-0' },
-        { id: 'e2', source: 'h1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' },
-      ],
-    });
-    const flow = await flowRes.json();
-    flowId = flow.id;
+  test('POST /api/executions/:executionId/cancel cancels running execution', async ({ page, request }) => {
+    flowId = await buildHITLFlow(page, request, uniqueFlowName('CancelTest'), 'Wait', [
+      { label: 'Go', value: 'go' },
+    ]);
 
     const { executeUntilPaused } = await import('./helpers/stream');
-    const { executionId } = await executeUntilPaused(flow.id, { message: 'cancel' }, cookie);
+    const { executionId } = await executeUntilPaused(flowId, { message: 'cancel' }, cookie);
 
     // Cancel via API
     const cancelRes = await fetch(`${API_URL}/executions/${executionId}/cancel`, {
@@ -269,23 +310,12 @@ test.describe('Cancel execution', () => {
   });
 
   test('cancel pending execution via the /settings/executions page', async ({ page, request }) => {
-    const flowRes = await createFlow(request, {
-      name: uniqueFlowName('CancelUI'),
-      nodes: [
-        { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Trigger', type: 'trigger', config: { triggerType: 'manual' } } },
-        { id: 'h1', type: 'hitl', position: { x: 300, y: 0 }, data: { label: 'Gate', type: 'hitl', config: { prompt: 'Wait', buttons: [{ label: 'Go', value: 'go' }] } } },
-        { id: 'o1', type: 'output', position: { x: 600, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: [] } } },
-      ],
-      edges: [
-        { id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'h1', targetHandle: 'input-0' },
-        { id: 'e2', source: 'h1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' },
-      ],
-    });
-    const flow = await flowRes.json();
-    flowId = flow.id;
+    flowId = await buildHITLFlow(page, request, uniqueFlowName('CancelUI'), 'Wait', [
+      { label: 'Go', value: 'go' },
+    ]);
 
     const { executeUntilPaused } = await import('./helpers/stream');
-    const { executionId } = await executeUntilPaused(flow.id, { message: 'cancel-ui' }, cookie);
+    const { executionId } = await executeUntilPaused(flowId, { message: 'cancel-ui' }, cookie);
 
     await page.goto('/settings/executions');
     await expect(page.getByText('Pending Approvals')).toBeVisible({ timeout: 10000 });
@@ -344,9 +374,9 @@ test.describe('Cancel execution', () => {
   });
 });
 
-// ─── Logout and password change ─────────────────────────────────
+// ─── Auth endpoints (no UI surface — API contract tests) ────────
 
-test.describe('Auth edge cases', () => {
+test.describe('Auth edge cases (API contract — no UI)', () => {
   test('POST /api/auth/logout clears session and API becomes unauthorized', async ({ page }) => {
     // Sanity check: authenticated before logout
     const beforeRes = await page.request.get(`${API_URL}/flows`);
@@ -411,9 +441,9 @@ test.describe('Auth edge cases', () => {
   });
 });
 
-// ─── Flow check-name endpoint ───────────────────────────────────
+// ─── Flow check-name endpoint (no UI surface) ───────────────────
 
-test.describe('Flow utilities', () => {
+test.describe('Flow utilities (API contract — no UI)', () => {
   test('GET /api/flows/check-name returns availability for unique name', async ({ request }) => {
     const res = await request.get(`${API_URL}/flows/check-name?name=UniqueFlow999`);
     expect(res.ok()).toBe(true);
@@ -434,9 +464,10 @@ test.describe('Flow utilities', () => {
   });
 });
 
-// ─── Settings CRUD ──────────────────────────────────────────────
+// ─── Settings CRUD (API contract — UI equivalents covered in the
+//     settings/groups/secrets specs) ─────────────────────────────
 
-test.describe('Settings CRUD from API', () => {
+test.describe('Settings CRUD from API (server contract — UI in settings specs)', () => {
   let createdId: string;
 
   test.afterEach(async ({ request }) => {
@@ -499,9 +530,9 @@ test.describe('Settings CRUD from API', () => {
   });
 });
 
-// ─── Document listing ───────────────────────────────────────────
+// ─── Document listing (no UI surface for these GET contracts) ───
 
-test.describe('Document endpoints', () => {
+test.describe('Document endpoints (API contract)', () => {
   test('GET /api/documents returns document list', async ({ request }) => {
     const res = await request.get(`${API_URL}/documents`);
     expect(res.ok()).toBe(true);
@@ -638,23 +669,13 @@ test.describe('Admin and niche endpoints', () => {
     expect(Array.isArray(data)).toBe(true);
   });
 
-  test('POST /api/executions/:id/admin-cancel cancels execution as admin', async ({ request }) => {
-    const flowRes = await createFlow(request, {
-      name: uniqueFlowName('AdminCancel'),
-      nodes: [
-        { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Trigger', type: 'trigger', config: { triggerType: 'manual' } } },
-        { id: 'h1', type: 'hitl', position: { x: 300, y: 0 }, data: { label: 'Gate', type: 'hitl', config: { prompt: 'Wait', buttons: [{ label: 'Go', value: 'go' }] } } },
-        { id: 'o1', type: 'output', position: { x: 600, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: [] } } },
-      ],
-      edges: [
-        { id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'h1', targetHandle: 'input-0' },
-        { id: 'e2', source: 'h1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' },
-      ],
-    });
-    const flow = await flowRes.json();
+  test('POST /api/executions/:id/admin-cancel cancels execution as admin', async ({ page, request }) => {
+    const flowId = await buildHITLFlow(page, request, uniqueFlowName('AdminCancel'), 'Wait', [
+      { label: 'Go', value: 'go' },
+    ]);
 
     const { executeUntilPaused } = await import('./helpers/stream');
-    const { executionId } = await executeUntilPaused(flow.id, { message: 'cancel' }, cookie);
+    const { executionId } = await executeUntilPaused(flowId, { message: 'cancel' }, cookie);
 
     const cancelRes = await fetch(`${API_URL}/executions/${executionId}/admin-cancel`, {
       method: 'POST',
@@ -665,23 +686,16 @@ test.describe('Admin and niche endpoints', () => {
     const exec = await pollExecution(request, executionId, 15000);
     expect(exec.status).toBe('cancelled');
 
-    await deleteFlow(request, flow.id);
+    await deleteFlow(request, flowId);
   });
 
   test('chat session messages SSE endpoint returns events', async ({ page, request }) => {
-    // Create a chat flow and session
-    const flowRes = await createFlow(request, {
-      name: uniqueFlowName('ChatMsgTest'),
-      nodes: [
-        { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Chat', type: 'trigger', config: { triggerType: 'chat' } } },
-        { id: 'o1', type: 'output', position: { x: 300, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: [] } } },
-      ],
-      edges: [{ id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' }],
-    });
-    const flow = await flowRes.json();
+    // The chat flow itself is built via the editor UI; the session + SSE
+    // stream are the endpoint under test (no UI surface for the raw stream).
+    const flowId = await buildChatFlow(page, request, uniqueFlowName('ChatMsgTest'));
 
     // Create a session
-    const sessionRes = await request.post(`${API_URL}/chat/${flow.id}/sessions`, { data: { title: 'Msg Test' } });
+    const sessionRes = await request.post(`${API_URL}/chat/${flowId}/sessions`, { data: { title: 'Msg Test' } });
     const { id: sessionId } = await sessionRes.json();
 
     // Read the SSE stream and assert at least one event arrives
@@ -714,6 +728,6 @@ test.describe('Admin and niche endpoints', () => {
     expect(doneEvent).toBeDefined();
     expect(doneEvent.data.content).toBeDefined();
 
-    await deleteFlow(request, flow.id);
+    await deleteFlow(request, flowId);
   });
 });
