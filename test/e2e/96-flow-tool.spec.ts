@@ -97,8 +97,9 @@ async function applyConfig(page: any, type: string, label: string, config: Recor
           const list = listRes.ok() ? await listRes.json() : [];
           const webhookNames = (list.data || list).map((f: any) => f.name);
           const inList = webhookNames.includes(name);
+          const modalText = await modal.innerText().catch(() => 'ERR');
           throw new Error(
-            `Flow Tool picker never showed "${name}" (${webhookNames.length} webhook flows in DB, flow found=${inList})`,
+            `Flow Tool picker never showed "${name}" (${webhookNames.length} webhook flows in DB, flow found=${inList}; modal shows: ${modalText.slice(0, 200).replace(/\n/g, ' | ')})`,
           );
         }
         const row = modal.locator('label').filter({ has: page.getByText(name, { exact: true }) });

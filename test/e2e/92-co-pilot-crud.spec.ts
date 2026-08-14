@@ -229,7 +229,7 @@ test.describe('Co-Pilot tools', () => {
     // Detail view shows the trace (the step fetch can be slow under load)
     await row.click();
     await expect(page.getByRole('heading', { name: 'Execution Details' })).toBeVisible({ timeout: 5000 });
-    await expect(page.getByText('Step Trace')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('Step Trace')).toBeVisible({ timeout: 20000 });
     // Return to the list via navigation (the state-toggle Back button can
     // detach mid-click while the detail view re-renders)
     await page.goto(`/flows/${flow.id}/executions`);
