@@ -8,6 +8,10 @@ function flowCard(page: any, name: string) {
 }
 
 test.describe('Flows overview', () => {
+  // Quick-run tests execute flows — a cold worker's first run can take a
+  // while, so the default 30s budget is too tight.
+  test.describe.configure({ timeout: 120000 });
+
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
   });
@@ -191,6 +195,191 @@ test.describe('Flows overview', () => {
 
     await page.getByRole('link', { name: 'Navigate Me' }).click();
     await expect(page).toHaveURL(new RegExp(`/flows/${flow.id}/edit`));
+
+    await deleteFlow(request, flow.id);
+  });
+
+  // ─── Quick run from the flow card (RunModal) ─────────────────────────
+
+  test('quick run: Run button opens the run modal with prefilled trigger input', async ({ page, request }) => {
+    const flowRes = await createFlow(request, {
+      name: uniqueFlowName('QuickRun'),
+      nodes: [
+        { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Trigger', type: 'trigger', config: { triggerType: 'manual' } } },
+        { id: 'o1', type: 'output', position: { x: 300, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: ['Trigger.message'] } } },
+      ],
+      edges: [{ id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' }],
+    });
+    const flow = await flowRes.json();
+
+    await page.goto('/');
+    const card = flowCard(page, flow.name);
+    await expect(card).toBeVisible({ timeout: 10000 });
+
+    // The Run button opens the modal with the default trigger input prefilled
+    await card.getByRole('button', { name: 'Run' }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: `Run ${flow.name}` })).toBeVisible({ timeout: 5000 });
+    await expect(dialog.locator('textarea')).toHaveValue(/"message": "Hello!"/);
+
+    // Invalid JSON is rejected client-side
+    await dialog.locator('textarea').fill('not json');
+    await dialog.getByRole('button', { name: 'Run' }).click();
+    await expect(dialog.getByText('Input must be valid JSON.')).toBeVisible({ timeout: 5000 });
+
+    // Cancel closes without running
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).not.toBeVisible({ timeout: 5000 });
+    await expect(card.getByRole('button', { name: 'Run' })).toBeVisible();
+
+    await deleteFlow(request, flow.id);
+  });
+
+  test('quick run: valid input executes the flow and the card shows Completed', async ({ page, request }) => {
+    const flowRes = await createFlow(request, {
+      name: uniqueFlowName('QuickRunExec'),
+      nodes: [
+        { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Trigger', type: 'trigger', config: { triggerType: 'manual' } } },
+        { id: 'o1', type: 'output', position: { x: 300, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: ['Trigger.message'] } } },
+      ],
+      edges: [{ id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' }],
+    });
+    const flow = await flowRes.json();
+
+    await page.goto('/');
+    const card = flowCard(page, flow.name);
+    await expect(card).toBeVisible({ timeout: 10000 });
+
+    await card.getByRole('button', { name: 'Run' }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: `Run ${flow.name}` })).toBeVisible({ timeout: 5000 });
+    await dialog.getByRole('button', { name: 'Run' }).click();
+
+    // The card shows the transient Completed state after the run starts
+    // (cold-worker first runs can be slow to emit the initial SSE event).
+    // Note: the span also contains the check_circle icon ligature, so the
+    // match must be non-exact.
+    await expect(card.getByText('Completed')).toBeVisible({ timeout: 45000 });
+
+    // A persisted execution was created (the quick run is not a debug run)
+    await expect.poll(async () => {
+      const res = await request.get(`${API_URL}/flows/${flow.id}/executions`);
+      if (!res.ok()) return 0;
+      const data = await res.json();
+      return (data.data || data).length;
+    }, { timeout: 10000 }).toBeGreaterThan(0);
+
+    await deleteFlow(request, flow.id);
+  });
+
+  // ─── Sort ────────────────────────────────────────────────────────────
+
+  test('sort by Created reorders the list', async ({ page, request }) => {
+    const older = await (await createFlow(request, { name: uniqueFlowName('SortOlder') })).json();
+    await new Promise(r => setTimeout(r, 1200));
+    const newer = await (await createFlow(request, { name: uniqueFlowName('SortNewer') })).json();
+
+    await page.goto('/');
+    await expect(page.getByRole('link', { name: older.name })).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('link', { name: newer.name })).toBeVisible();
+
+    // Default "Last updated" — newer first
+    const cards = page.locator('div.rounded-lg.border.p-4');
+    await expect(cards.first()).toContainText(newer.name);
+
+    // Switch to "Created" — still newest created first
+    await page.getByText('Last updated').click();
+    await page.getByRole('option', { name: 'Created' }).click();
+    await expect(cards.first()).toContainText(newer.name, { timeout: 5000 });
+    await expect(cards.nth(1)).toContainText(older.name);
+
+    await deleteFlow(request, older.id);
+    await deleteFlow(request, newer.id);
+  });
+
+  // ─── Pagination ──────────────────────────────────────────────────────
+
+  test('pagination: Next and Previous pages with more than 20 flows', async ({ page, request }) => {
+    const created: any[] = [];
+    for (let i = 0; i < 22; i++) {
+      created.push(await (await createFlow(request, { name: uniqueFlowName(`PageFlow${i}`) })).json());
+    }
+    const last = created[created.length - 1].name;
+
+    await page.goto('/');
+    await expect(page.getByText('Page 1 of 2', { exact: true })).toBeVisible({ timeout: 10000 });
+    // The newest flow is on the first page
+    await expect(page.getByRole('link', { name: last })).toBeVisible({ timeout: 5000 });
+    // 20 cards on page 1
+    await expect(page.locator('div.rounded-lg.border.p-4')).toHaveCount(20);
+
+    // Next page shows the remaining flows (earlier tests may leak flows, so
+    // the exact count varies — the first of our fixtures must be here though)
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await expect(page.getByText('Page 2 of 2', { exact: true })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('link', { name: created[0].name })).toBeVisible({ timeout: 5000 });
+    // A partial page — fewer than 20 cards
+    await expect.poll(async () => page.locator('div.rounded-lg.border.p-4').count(), { timeout: 5000 }).toBeLessThan(20);
+
+    // Previous returns to page 1
+    await page.getByRole('button', { name: 'Previous', exact: true }).click();
+    await expect(page.getByText('Page 1 of 2', { exact: true })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('link', { name: last })).toBeVisible({ timeout: 5000 });
+
+    for (const f of created) await deleteFlow(request, f.id);
+  });
+
+  // ─── Per-trigger card actions ────────────────────────────────────────
+
+  test('chat flow card links to the chat page', async ({ page, request }) => {
+    const flowRes = await createFlow(request, {
+      name: uniqueFlowName('ChatCard'),
+      nodes: [
+        { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Chat', type: 'trigger', config: { triggerType: 'chat' } } },
+        { id: 'o1', type: 'output', position: { x: 300, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: ['Trigger.message'] } } },
+      ],
+      edges: [{ id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' }],
+    });
+    const flow = await flowRes.json();
+
+    await page.goto('/');
+    const card = flowCard(page, flow.name);
+    await expect(card).toBeVisible({ timeout: 10000 });
+
+    // The Open Chat link goes to the chat session list
+    await card.getByRole('link', { name: 'Open Chat' }).click();
+    await expect(page).toHaveURL(new RegExp(`/chat/${flow.id}$`));
+    await expect(page.getByRole('heading', { name: 'Chat Sessions' })).toBeVisible({ timeout: 10000 });
+
+    await deleteFlow(request, flow.id);
+  });
+
+  test('webhook flow card links to the API docs', async ({ page, request }) => {
+    const flowRes = await createFlow(request, {
+      name: uniqueFlowName('ApiCard'),
+      nodes: [
+        { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Webhook', type: 'trigger', config: { triggerType: 'webhook' } } },
+        { id: 'o1', type: 'output', position: { x: 300, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: ['Trigger.message'] } } },
+      ],
+      edges: [{ id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' }],
+    });
+    const flow = await flowRes.json();
+
+    await page.goto('/');
+    const card = flowCard(page, flow.name);
+    await expect(card).toBeVisible({ timeout: 10000 });
+
+    await card.locator('a[href="/api/docs"]').click();
+    // The link opens the Swagger UI in a new tab
+    const popupPromise = page.waitForEvent('popup', { timeout: 5000 }).catch(() => null);
+    const popup = await popupPromise;
+    if (popup) {
+      await popup.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+      await expect(popup.locator('body')).not.toHaveText(/404/, { timeout: 10000 });
+    } else {
+      // Fallback: the docs may render in the same tab
+      await expect(page.locator('body')).not.toHaveText(/404/, { timeout: 10000 });
+    }
 
     await deleteFlow(request, flow.id);
   });

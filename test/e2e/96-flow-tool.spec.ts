@@ -75,8 +75,32 @@ async function applyConfig(page: any, type: string, label: string, config: Recor
       break;
     }
     case 'flow-tool':
+      // The flow list is fetched on modal mount; under parallel-stack load the
+      // GET can be slow or land before the tool flow's save became visible.
+      // Reopen the modal (fresh mount → fresh fetch) before giving up — a
+      // genuinely misconfigured flow (e.g. not saved as webhook) still fails.
       for (const name of config.selectedFlowNames || []) {
-        await modal.getByText(name, { exact: true }).waitFor({ timeout: 5000 });
+        let seen = false;
+        for (let attempt = 0; attempt < 3 && !seen; attempt++) {
+          if (attempt > 0) {
+            await closeConfig(page);
+            await openConfig(page, label);
+          }
+          try {
+            await modal.getByText(name, { exact: true }).waitFor({ timeout: 10000 });
+            seen = true;
+          } catch { /* retry with a fresh modal */ }
+        }
+        if (!seen) {
+          // Diagnostic: was the flow saved as a webhook flow at all?
+          const listRes = await page.request.get(`${API_URL}/flows?trigger_type=webhook&limit=100`);
+          const list = listRes.ok() ? await listRes.json() : [];
+          const webhookNames = (list.data || list).map((f: any) => f.name);
+          const inList = webhookNames.includes(name);
+          throw new Error(
+            `Flow Tool picker never showed "${name}" (${webhookNames.length} webhook flows in DB, flow found=${inList})`,
+          );
+        }
         const row = modal.locator('label').filter({ has: page.getByText(name, { exact: true }) });
         await row.locator('input[type="checkbox"]').check();
       }
@@ -248,6 +272,14 @@ async function buildFlowInEditor(page: any, flowId: string, nodes: UiNode[], edg
     }
   }
   await saveFlow(page);
+  // Durability: wait for the PUT to land before returning — the flow-tool
+  // picker in a follow-up flow fetches /flows on modal open, and a save that
+  // is still in flight would leave the just-created tool flow missing from
+  // the list (caused intermittent flakes).
+  await page.waitForResponse(
+    (r: any) => r.url().includes(`/api/flows/${flowId}`) && r.request().method() === 'PUT',
+    { timeout: 10000 },
+  ).catch(() => {});
   return flowId;
 }
 
@@ -348,6 +380,10 @@ test.describe('Flow Tool node', () => {
 });
 
 test.describe('Flow Tool config', () => {
+  // The beforeEach builds two flows through the editor UI (~20-28s); the
+  // default 30s budget leaves almost nothing for the test body itself.
+  test.describe.configure({ timeout: 90000 });
+
   let webhookFlowId: string;
   let webhookFlowName: string;
   let flowId: string;
