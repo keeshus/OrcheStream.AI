@@ -84,7 +84,24 @@ async function applyConfig(page: any, type: string, label: string, config: Recor
         for (let attempt = 0; attempt < 3 && !seen; attempt++) {
           if (attempt > 0) {
             await closeConfig(page);
-            await openConfig(page, label);
+            // A canvas-level click can land on a node overlapping the Flow
+            // Tool node — dispatch a DOM click straight on its element.
+            await page.evaluate((lbl: string) => {
+              for (const n of document.querySelectorAll('.react-flow__node')) {
+                if (n.textContent && n.textContent.includes(lbl)) { (n as HTMLElement).click(); return; }
+              }
+            }, label);
+            await expect(modal).toBeVisible({ timeout: 5000 });
+            // Verify the right config modal is showing.
+            if (!(await modal.getByText('Flow Tool', { exact: true }).isVisible().catch(() => false))) {
+              await closeConfig(page);
+              await page.evaluate((lbl: string) => {
+                for (const n of document.querySelectorAll('.react-flow__node')) {
+                  if (n.textContent && n.textContent.includes(lbl)) { (n as HTMLElement).click(); return; }
+                }
+              }, label);
+              await expect(modal).toBeVisible({ timeout: 5000 });
+            }
           }
           try {
             await modal.getByText(name, { exact: true }).waitFor({ timeout: 10000 });
@@ -152,6 +169,14 @@ async function openConfig(page: any, label: string) {
     await page.getByRole('button', { name: 'Fit View' }).click().catch(() => {});
     await page.waitForTimeout(300);
   }
+  // A DOM-level click dispatches straight on the node element, bypassing
+  // canvas hit-testing — overlapping nodes can otherwise intercept the click.
+  await page.evaluate((lbl: string) => {
+    for (const n of document.querySelectorAll('.react-flow__node')) {
+      if (n.textContent && n.textContent.includes(lbl)) { (n as HTMLElement).click(); return; }
+    }
+  }, label);
+  if (await page.getByTestId('node-config-modal').isVisible().catch(() => false)) return;
   for (let attempt = 0; attempt < 4; attempt++) {
     const node = nodeByLabel(page, label);
     await node.click({ timeout: 2500 }).catch(() => {});

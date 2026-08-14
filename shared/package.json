@@ -27,13 +27,13 @@
     "drizzle-orm": "^0.45.2",
     "pg": "^8.23.0",
     "zod": "^4.4.3",
-    "@qdrant/js-client-rest": "^1.18.0",
+    "@qdrant/js-client-rest": "^1.19.0",
     "neo4j-driver": "^6.2.0"
   },
   "devDependencies": {
     "@types/pg": "^8.21.0",
     "drizzle-kit": "^0.31.10",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }
 }
