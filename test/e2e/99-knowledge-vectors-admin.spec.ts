@@ -1,14 +1,18 @@
 import { test, expect } from '@playwright/test';
 import { createFlow, deleteFlow, uniqueFlowName } from './helpers/api';
-import { pollExecution } from './helpers/stream';
 import { getAuthCookie } from './helpers/auth';
+import { createChatSessionViaUi, deleteChatSessionViaUi } from './helpers/settings';
 
 const API_URL = process.env.E2E_API_URL || 'http://localhost:3001/api';
 const cookie = getAuthCookie() || undefined;
 
 // ─── Knowledge management ───────────────────────────────────────
+// NOTE: by product decision there is NO document-management UI — the app
+// only manages embedding providers and external vector stores (the
+// retriever node searches those stores at runtime). The upload/collection
+// endpoints remain as the ingestion API (external integrations, fixtures).
 
-test.describe('Knowledge CRUD', () => {
+test.describe('Knowledge CRUD (API contract — no document UI by design)', () => {
   let docId: string;
 
   test.afterEach(async ({ request }) => {
@@ -64,7 +68,6 @@ test.describe('Knowledge CRUD', () => {
     docId = data.id;
     expect(data.chunkCount).toBeGreaterThan(0);
 
-    // The collection listing reports the document count
     const colsRes = await request.get(`${API_URL}/knowledge/collections`);
     expect(colsRes.ok()).toBe(true);
     const cols = await colsRes.json();
@@ -72,7 +75,6 @@ test.describe('Knowledge CRUD', () => {
     expect(col).toBeDefined();
     expect(col.document_count).toBeGreaterThanOrEqual(1);
 
-    // Collection detail lists the uploaded document
     const colRes = await request.get(`${API_URL}/knowledge/collections/e2e-chunk-count`);
     expect(colRes.ok()).toBe(true);
     const docs = await colRes.json();
@@ -98,7 +100,6 @@ test.describe('Knowledge CRUD', () => {
     const after = await (await request.get(`${API_URL}/documents`)).json();
     expect(after.some((d: any) => d.id === doc.id)).toBe(false);
 
-    // Deleted document is also gone from its collection
     const colDocs = await (await request.get(`${API_URL}/knowledge/collections/e2e-del-doc`)).json();
     expect(colDocs.some((d: any) => d.id === doc.id)).toBe(false);
   });
@@ -123,36 +124,7 @@ test.describe('Knowledge CRUD', () => {
   });
 });
 
-// ─── Admin endpoints ────────────────────────────────────────────
-
-test.describe('Admin endpoints', () => {
-  let testUserId: string;
-  let groupId: string;
-
-  test.beforeAll(async ({ request }) => {
-    // Create a test user
-    const userRes = await request.post(`${API_URL}/users`, {
-      data: {
-        name: 'E2E Test User', email: `e2e-${Date.now()}@test.local`,
-        password: 'Test1234!', roleName: 'editor',
-      },
-    });
-    if (userRes.ok()) testUserId = (await userRes.json()).id;
-
-    const groupRes = await request.post(`${API_URL}/groups`, { data: { name: `E2EGroup-${Date.now()}` } });
-    if (groupRes.ok()) groupId = (await groupRes.json()).id;
-  });
-
-  test.afterAll(async ({ request }) => {
-    if (testUserId) await request.delete(`${API_URL}/users/${testUserId}`).catch(() => {});
-    if (groupId) await request.delete(`${API_URL}/groups/${groupId}`).catch(() => {});
-  });
-
-  // Note: GET /api/assignments is mounted at /api not /api/assignments (routing bug)
-  // Assignments are tested via the approvals page and execution approve flow
-});
-
-// ─── Vector store endpoints ─────────────────────────────────────
+// ─── Vector store endpoints (CRUD via UI is covered in 70-settings) ──────────
 
 test.describe('Vector store endpoints', () => {
   let storeId: string;
@@ -161,62 +133,14 @@ test.describe('Vector store endpoints', () => {
     if (storeId) await request.delete(`${API_URL}/vector-stores/${storeId}`).catch(() => {});
   });
 
-  test('create vector store', async ({ request }) => {
-    const res = await request.post(`${API_URL}/vector-stores`, {
-      data: { name: 'E2E Vector Store', storeType: 'qdrant', url: 'http://qdrant-e2e:6333' },
-    });
-    expect(res.ok()).toBe(true);
-    const store = await res.json();
-    storeId = store.id;
-    expect(store.name).toBe('E2E Vector Store');
-  });
-
-  test('get vector store by ID', async ({ request }) => {
-    const createRes = await request.post(`${API_URL}/vector-stores`, {
-      data: { name: 'GetByID', storeType: 'qdrant', url: 'http://qdrant-e2e:6333' },
-    });
-    const store = await createRes.json();
-    storeId = store.id;
-
-    const getRes = await request.get(`${API_URL}/vector-stores/${store.id}`);
-    expect(getRes.ok()).toBe(true);
-    const fetched = await getRes.json();
-    expect(fetched.id).toBe(store.id);
-  });
-
-  test('update vector store', async ({ request }) => {
-    const createRes = await request.post(`${API_URL}/vector-stores`, {
-      data: { name: 'UpdateStore', storeType: 'qdrant', url: 'http://qdrant-e2e:6333' },
-    });
-    const store = await createRes.json();
-    storeId = store.id;
-
-    const updateRes = await request.put(`${API_URL}/vector-stores/${store.id}`, {
-      data: { name: 'UpdatedStore' },
-    });
-    expect(updateRes.ok()).toBe(true);
-  });
-
-  test('list collections via vector store', async ({ request }) => {
+  test('list collections via a vector store (contract)', async ({ request }) => {
     const createRes = await request.post(`${API_URL}/vector-stores`, {
       data: { name: 'ColStore', storeType: 'qdrant', url: 'http://qdrant-e2e:6333' },
     });
     const store = await createRes.json();
     storeId = store.id;
-
     const colRes = await request.get(`${API_URL}/vector-stores/${store.id}/collections`);
     expect(colRes.ok()).toBe(true);
-  });
-
-  test('refresh vector store', async ({ request }) => {
-    const createRes = await request.post(`${API_URL}/vector-stores`, {
-      data: { name: 'RefreshStore', storeType: 'qdrant', url: 'http://qdrant-e2e:6333' },
-    });
-    const store = await createRes.json();
-    storeId = store.id;
-
-    const refreshRes = await request.post(`${API_URL}/vector-stores/${store.id}/refresh`);
-    expect(refreshRes.ok()).toBe(true);
   });
 
   test('retriever queries an uploaded collection and returns structured results', async ({ request }) => {
@@ -272,7 +196,6 @@ test.describe('Vector store endpoints', () => {
     expect(retrieverOutput.query).toBe('vector database');
     expect(typeof retrieverOutput.count).toBe('number');
     expect(Array.isArray(retrieverOutput.chunks)).toBe(true);
-    // count is always the length of the returned chunk list
     expect(retrieverOutput.count).toBe(retrieverOutput.chunks.length);
     // The uploaded chunk TEXT must actually be returned — regression guard:
     // the search used to hit an empty Qdrant store and return 0 chunks.
@@ -294,7 +217,7 @@ test.describe('Execution history', () => {
     if (flowId) await deleteFlow(request, flowId).catch(() => {});
   });
 
-  test('GET /api/flows/:flowId/executions returns execution list for a flow', async ({ request }) => {
+  test('GET /api/flows/:flowId/executions returns execution list (contract)', async ({ request }) => {
     const flowRes = await createFlow(request, {
       name: uniqueFlowName('ExecHist'),
       nodes: [
@@ -317,35 +240,41 @@ test.describe('Execution history', () => {
     expect(Array.isArray(execs.data || execs)).toBe(true);
   });
 
-  test('execution history page renders and shows executions', async ({ page, request }) => {
+  test('execution history page shows the paused execution', async ({ page, request }) => {
     const flowRes = await createFlow(request, {
       name: uniqueFlowName('ExecHistPage'),
       nodes: [
         { id: 't1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Trigger', type: 'trigger', config: { triggerType: 'manual' } } },
-        { id: 'o1', type: 'output', position: { x: 300, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: [] } } },
+        { id: 'h1', type: 'hitl', position: { x: 300, y: 0 }, data: { label: 'Gate', type: 'hitl', config: { prompt: 'Go?', buttons: [{ label: 'Approve', value: 'approved' }] } } },
+        { id: 'o1', type: 'output', position: { x: 600, y: 0 }, data: { label: 'Output', type: 'output', config: { inputFields: [] } } },
       ],
-      edges: [{ id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' }],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'h1', targetHandle: 'input-0' },
+        { id: 'e2', source: 'h1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' },
+      ],
     });
     const flow = await flowRes.json();
     flowId = flow.id;
 
-    // Run an execution
-    const { debugExecute } = await import('./helpers/stream');
-    await debugExecute(flow.id, { message: 'test' }, cookie);
+    // Debug runs are excluded from the run history — use a persisted run
+    // paused at the HITL gate (awaiting_approval)
+    const { executeUntilPaused } = await import('./helpers/stream');
+    const cookie = (await import('./helpers/auth')).getAuthCookie() || undefined;
+    const { executionId } = await executeUntilPaused(flow.id, { message: 'test' }, cookie);
+    expect(executionId).toBeTruthy();
 
-    // Navigate to the global executions page
-    await page.goto('/executions');
-    await page.waitForLoadState('networkidle');
-    // The page should show some content
-    await expect(page.locator('h1, h2, h3').first()).toBeVisible({ timeout: 10000 });
+    // The run history page lists the execution with an Awaiting Approval badge
+    await page.goto(`/flows/${flow.id}/executions`);
+    const row = page.locator('div.bg-surface.rounded-lg.border.p-4').first();
+    await expect(row).toBeVisible({ timeout: 10000 });
+    await expect(row.getByText('Awaiting Approval')).toBeVisible({ timeout: 5000 });
   });
 });
 
-// ─── Chat sessions ──────────────────────────────────────────────
+// ─── Chat sessions (CRUD via the chat page UI) ──────────────────
 
 test.describe('Chat sessions', () => {
   let flowId: string;
-  let sessionId: string;
 
   test.beforeAll(async ({ request }) => {
     const res = await createFlow(request, {
@@ -357,42 +286,30 @@ test.describe('Chat sessions', () => {
       edges: [{ id: 'e1', source: 't1', sourceHandle: 'output-0', target: 'o1', targetHandle: 'input-0' }],
     });
     flowId = (await res.json()).id;
-
-    const sessionRes = await request.post(`${API_URL}/chat/${flowId}/sessions`, { data: { title: 'E2E Session' } });
-    expect(sessionRes.ok()).toBe(true);
-    const session = await sessionRes.json();
-    sessionId = session.id;
-    expect(session.id).toBeDefined();
   });
 
   test.afterAll(async ({ request }) => {
     if (flowId) await deleteFlow(request, flowId).catch(() => {});
   });
 
-  test('GET /api/chat/sessions/:sessionId returns session details', async ({ request }) => {
+  test('session list shows the session created via the UI', async ({ page, request }) => {
+    const sessionId = await createChatSessionViaUi(page, flowId);
     expect(sessionId).toBeTruthy();
-    const res = await request.get(`${API_URL}/chat/sessions/${sessionId}`);
-    expect(res.ok()).toBe(true);
-    const session = await res.json();
-    expect(session.id).toBe(sessionId);
-  });
 
-  test('GET /api/chat/:flowId/sessions lists the created session', async ({ request }) => {
-    const res = await request.get(`${API_URL}/chat/${flowId}/sessions`);
-    expect(res.ok()).toBe(true);
-    const sessions = await res.json();
-    expect(Array.isArray(sessions)).toBe(true);
+    const sessions = await (await request.get(`${API_URL}/chat/${flowId}/sessions`)).json();
     expect(sessions.some((s: any) => s.id === sessionId)).toBe(true);
+
+    // Clean up so the following test sees a single session row
+    await deleteChatSessionViaUi(page, flowId, 'New Chat');
   });
 
-  test('DELETE /api/chat/sessions/:sessionId deletes a session', async ({ request }) => {
-    expect(sessionId).toBeTruthy();
-    const res = await request.delete(`${API_URL}/chat/sessions/${sessionId}`);
-    expect(res.status()).toBe(204);
+  test('DELETE /api/chat/sessions/:sessionId returns 404 after UI deletion', async ({ page, request }) => {
+    const sessionId = await createChatSessionViaUi(page, flowId);
+
+    await deleteChatSessionViaUi(page, flowId, 'New Chat');
 
     const gone = await request.get(`${API_URL}/chat/sessions/${sessionId}`);
     expect(gone.status()).toBe(404);
-    sessionId = '';
   });
 });
 
@@ -420,33 +337,5 @@ test.describe('Flow error handling', () => {
     }
 
     await deleteFlow(request, flow.id);
-  });
-});
-
-// ─── Secret vault update ────────────────────────────────────────
-
-test.describe('Secret vault update', () => {
-  let vaultId: string;
-
-  test.afterEach(async ({ request }) => {
-    if (vaultId) await request.delete(`${API_URL}/secret-vaults/${vaultId}`).catch(() => {});
-  });
-
-  test('PUT /api/secret-vaults/:id updates vault config', async ({ request }) => {
-    // Create a group first
-    const groupRes = await request.post(`${API_URL}/groups`, { data: { name: `VaultGroup-${Date.now()}` } });
-    const group = await groupRes.json();
-
-    const createRes = await request.post(`${API_URL}/secret-vaults`, {
-      data: { name: 'E2E Vault', vaultType: 'cyberark', baseUrl: 'http://mock-cyberark-e2e:3005', account: 'conjur', login: 'admin', apiKey: 'test-key', groupId: group.id },
-    });
-    expect(createRes.ok()).toBe(true);
-    const vault = await createRes.json();
-    vaultId = vault.id;
-
-    const updateRes = await request.put(`${API_URL}/secret-vaults/${vault.id}`, {
-      data: { name: 'E2E Vault Updated' },
-    });
-    expect(updateRes.ok()).toBe(true);
   });
 });

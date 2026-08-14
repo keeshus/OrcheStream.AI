@@ -43,63 +43,12 @@ const cleanupUserIds: string[] = [];
   });
 
   // ═══════════════════════════════════════════════════════════════
-  // ─── Agent Context CRUD ─────────────────────────────────────
+  // ─── Agent Context CRUD (via the home page UI) ───────────────
+  // NOTE: the API happy-path CRUD tests were removed — the home page
+  // Agent Contexts tab covers create/edit/delete through the UI below
+  // ('agent contexts form group selector assigns context to group',
+  // 'edit an agent context via UI', 'delete an agent context via UI').
   // ═══════════════════════════════════════════════════════════════
-
-  test('create an agent context via API', async ({ request }) => {
-    const res = await request.post(`${API_URL}/agent-contexts`, {
-      data: { title: 'Brand Voice', description: 'Tone and style guide', content: 'Use a professional yet approachable tone.' },
-    });
-    expect(res.status()).toBe(201);
-    const ctx = await res.json();
-    expect(ctx.title).toBe('Brand Voice');
-    expect(ctx.content).toBe('Use a professional yet approachable tone.');
-    cleanupContextIds.push(ctx.id);
-  });
-
-  test('list all agent contexts', async ({ request }) => {
-    const c1 = await request.post(`${API_URL}/agent-contexts`, { data: { title: 'Alpha' } });
-    const c2 = await request.post(`${API_URL}/agent-contexts`, { data: { title: 'Beta' } });
-    const ctx1 = await c1.json();
-    const ctx2 = await c2.json();
-    cleanupContextIds.push(ctx1.id, ctx2.id);
-
-    const listRes = await request.get(`${API_URL}/agent-contexts`);
-    expect(listRes.status()).toBe(200);
-    const list = await listRes.json();
-    const titles = list.map((c: any) => c.title);
-    expect(titles).toContain('Alpha');
-    expect(titles).toContain('Beta');
-  });
-
-  test('update an agent context via API', async ({ request }) => {
-    const res = await request.post(`${API_URL}/agent-contexts`, {
-      data: { title: 'Old Title', content: 'Old content' },
-    });
-    const ctx = await res.json();
-    cleanupContextIds.push(ctx.id);
-
-    const updRes = await request.put(`${API_URL}/agent-contexts/${ctx.id}`, {
-      data: { title: 'New Title', content: 'New content' },
-    });
-    expect(updRes.status()).toBe(200);
-    const updated = await updRes.json();
-    expect(updated.title).toBe('New Title');
-    expect(updated.content).toBe('New content');
-  });
-
-  test('delete an agent context via API', async ({ request }) => {
-    const res = await request.post(`${API_URL}/agent-contexts`, {
-      data: { title: 'Delete Me' },
-    });
-    const ctx = await res.json();
-
-    const delRes = await request.delete(`${API_URL}/agent-contexts/${ctx.id}`);
-    expect(delRes.status()).toBe(204);
-
-    const getRes = await request.get(`${API_URL}/agent-contexts/${ctx.id}`);
-    expect(getRes.status()).toBe(404);
-  });
 
   test('rejects empty title', async ({ request }) => {
     const res = await request.post(`${API_URL}/agent-contexts`, {
@@ -251,40 +200,45 @@ const cleanupUserIds: string[] = [];
   });
 
   // ═══════════════════════════════════════════════════════════════
-  // ─── Group Context ───────────────────────────────────────────
+  // ─── Group Context (via the global-context settings page) ─────
   // ═══════════════════════════════════════════════════════════════
 
-  test('group context can be set on group creation', async ({ request }) => {
+  test('group context: create group via UI, set context via settings page', async ({ page, request }) => {
     const name = `Ctx-Group-${Date.now()}`;
-    const res = await request.post(`${API_URL}/groups`, {
-      data: { name, description: 'Test', context: 'This group manages customer-facing flows.' },
-    });
-    expect(res.status()).toBe(201);
-    const group = await res.json();
-    expect(group.context).toBe('This group manages customer-facing flows.');
+
+    // Create the group through the groups settings page
+    await page.goto('/settings/groups');
+    await page.getByRole('button', { name: 'Create Group' }).first().click();
+    await page.getByLabel('Name').fill(name);
+    await page.getByRole('button', { name: 'Create Group' }).last().click();
+    await expect(page.getByText(name)).toBeVisible({ timeout: 5000 });
+    const group = (await (await request.get(`${API_URL}/groups`)).json()).find((g: any) => g.name === name);
+    expect(group).toBeDefined();
     cleanupGroupIds.push(group.id);
-  });
 
-  test('group context is returned in group detail', async ({ request }) => {
-    const name = `Detail-Ctx-Group-${Date.now()}`;
-    const res = await request.post(`${API_URL}/groups`, {
-      data: { name, context: 'Group-level instructions.' },
-    });
-    expect(res.status()).toBe(201);
-    const group = await res.json();
+    // Set the context via the global-context page (group scope)
+    await page.goto('/settings/global-context');
+    await expect(page.locator('h1').filter({ hasText: 'Global Context' }).first()).toBeVisible({ timeout: 10000 });
+    await page.getByText('All groups').first().click();
+    await page.getByText(name, { exact: true }).first().click();
+    const textarea = page.locator('textarea');
+    await expect(textarea).toBeEnabled({ timeout: 5000 });
+    await textarea.fill('This group manages customer-facing flows.');
+    await page.getByRole('button', { name: 'Save' }).click();
+    await expect(page.getByText(/Context saved for/)).toBeVisible({ timeout: 5000 });
 
-    const getRes = await request.get(`${API_URL}/groups/${group.id}`);
-    const detail = await getRes.json();
-    expect(detail.context).toBe('Group-level instructions.');
-
-    await request.delete(`${API_URL}/groups/${group.id}`);
+    // Reload — the context persists and is shown in the group filter
+    await page.goto('/settings/global-context');
+    await page.getByText('All groups').first().click();
+    await page.getByText(name, { exact: true }).first().click();
+    await expect(page.locator('textarea')).toHaveValue('This group manages customer-facing flows.', { timeout: 5000 });
   });
 
   // ═══════════════════════════════════════════════════════════════
   // ─── Flow Context ────────────────────────────────────────────
   // ═══════════════════════════════════════════════════════════════
 
-  test('flow context can be set via API', async ({ request }) => {
+  test('flow context can be set via the Flow Settings modal', async ({ page, request }) => {
     const res = await createFlow(request, {
       name: uniqueFlowName('Context-Flow'),
       nodes: [{ id: 'n1', type: 'trigger', position: { x: 0, y: 0 }, data: { label: 'Trigger', type: 'trigger', config: { triggerType: 'manual' } } }],
@@ -293,12 +247,19 @@ const cleanupUserIds: string[] = [];
     const flow = await res.json();
     cleanupFlowIds.push(flow.id);
 
-    const updRes = await request.put(`${API_URL}/flows/${flow.id}`, {
-      data: { flow_context: 'This flow handles user onboarding.' },
-    });
-    expect(updRes.ok()).toBe(true);
-    const updated = await updRes.json();
-    expect(updated.flow_context).toBe('This flow handles user onboarding.');
+    await page.goto(`/flows/${flow.id}/edit`);
+    await expect(page.getByTestId('flow-canvas')).toBeVisible({ timeout: 15000 });
+
+    // Open Flow Settings and set the Flow Context (auto-saves on change)
+    await page.getByTestId('flow-settings-btn').click();
+    await expect(page.getByText('Flow Settings')).toBeVisible({ timeout: 5000 });
+    const contextField = page.getByPlaceholder('Context for this specific flow...');
+    await contextField.fill('This flow handles user onboarding.');
+    await expect.poll(async () => {
+      const res = await request.get(`${API_URL}/flows/${flow.id}`);
+      if (!res.ok()) return null;
+      return (await res.json()).flow_context;
+    }, { timeout: 10000 }).toBe('This flow handles user onboarding.');
   });
 
   // ═══════════════════════════════════════════════════════════════

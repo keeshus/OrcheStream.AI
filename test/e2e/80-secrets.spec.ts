@@ -32,19 +32,11 @@ test.describe('Secrets management', () => {
   });
 
   // ═══════════════════════════════════════════════════════════════
-  // ─── App-scoped secrets CRUD ────────────────────────────────
+  // ─── App-scoped secrets ─────────────────────────────────────
+  // NOTE: happy-path create/reveal/delete via API were removed — the
+  // secrets settings page covers them through the UI below. Only
+  // contracts (no-leak, validation) remain.
   // ═══════════════════════════════════════════════════════════════
-
-  test('create an app-level secret', async ({ request }) => {
-    const res = await request.post(`${API_URL}/secrets`, {
-      data: { name: 'api-key', value: 'sk-abc123', scope: 'app' },
-    });
-    expect(res.status()).toBe(201);
-    const secret = await res.json();
-    expect(secret.name).toBe('api-key');
-    expect(secret.scope).toBe('app');
-    cleanupSecretIds.push(secret.id);
-  });
 
   test('list secrets returns metadata only (no values)', async ({ request }) => {
     const res = await request.post(`${API_URL}/secrets`, { data: { name: 'db-pass', value: 'secret123', scope: 'app' } });
@@ -60,27 +52,9 @@ test.describe('Secrets management', () => {
     expect(found.encrypted_value).toBeUndefined();
   });
 
-  test('reveal a secret returns the plaintext value', async ({ request }) => {
-    const res = await request.post(`${API_URL}/secrets`, { data: { name: 'my-secret', value: 'plaintext-value', scope: 'app' } });
-    const secret = await res.json();
-    cleanupSecretIds.push(secret.id);
-
-    const revealRes = await request.post(`${API_URL}/secrets/${secret.id}/reveal`);
-    expect(revealRes.status()).toBe(200);
-    const revealed = await revealRes.json();
-    expect(revealed.value).toBe('plaintext-value');
-  });
-
-  test('delete a secret', async ({ request }) => {
-    const res = await request.post(`${API_URL}/secrets`, { data: { name: 'delete-me', value: 'x', scope: 'app' } });
-    const secret = await res.json();
-
-    const delRes = await request.delete(`${API_URL}/secrets/${secret.id}`);
-    expect(delRes.status()).toBe(200);
-
-    const getRes = await request.get(`${API_URL}/secrets/${secret.id}`);
-    expect(getRes.status()).toBe(404);
-  });
+  // NOTE: the API-level reveal/delete happy-path tests were removed — they
+  // are covered through the secrets page UI below ('reveal a secret via UI…',
+  // 'delete a secret via UI…').
 
   test('rejects duplicate secret name in same scope', async ({ request }) => {
     const res = await request.post(`${API_URL}/secrets`, { data: { name: 'dup-test', value: 'first', scope: 'app' } });
@@ -181,6 +155,9 @@ test.describe('Secrets management', () => {
   });
 
   test('test connection to Conjur vault', async ({ request }) => {
+    // NOTE: the UI path (create vault + Test button + check_circle) is
+    // covered by 'create a vault via the UI and test the connection'.
+    // This contract pins the API response shape.
     const gRes = await request.post(`${API_URL}/groups`, { data: { name: `Vault-Group-${Date.now()}` } });
     const group = await gRes.json();
     cleanupGroupIds.push(group.id);
@@ -205,7 +182,10 @@ test.describe('Secrets management', () => {
     expect(testResult.success).toBe(true);
   });
 
-  test('bind a vault to a group via group-vault-config', async ({ request }) => {
+  test('bind a vault to a group via group-vault-config (admin contract)', async ({ request }) => {
+    // Creating a vault with a groupId auto-binds it (see routes/secret-vaults.ts);
+    // this endpoint is for repointing the group's active vault. Kept as an
+    // admin contract — no UI exists for the active-vault picker.
     const gRes = await request.post(`${API_URL}/groups`, { data: { name: `Vault-Group-${Date.now()}` } });
     const group = await gRes.json();
     cleanupGroupIds.push(group.id);
@@ -427,7 +407,7 @@ test.describe('Secrets management', () => {
   // ─── Group-scoped secrets: CRUD + list scope filter ──────────
   // ═══════════════════════════════════════════════════════════════
 
-  test('group-scoped secret CRUD via API and scope labels on secrets page', async ({ page, request }) => {
+  test('group-scoped secret: full lifecycle via the secrets page UI', async ({ page, request }) => {
     const appName = `app-scoped-${Date.now()}`;
     const grpName = `group-scoped-${Date.now()}`;
     // Create a group
@@ -436,52 +416,69 @@ test.describe('Secrets management', () => {
     const group = await gRes.json();
     cleanupGroupIds.push(group.id);
 
-    // Create an app-scoped and a group-scoped secret
-    const appRes = await request.post(`${API_URL}/secrets`, { data: { name: appName, value: 'app-value', scope: 'app' } });
-    expect(appRes.status()).toBe(201);
-    const appSecret = await appRes.json();
-    cleanupSecretIds.push(appSecret.id);
-
-    const grpRes = await request.post(`${API_URL}/secrets`, { data: { name: grpName, value: 'group-value', scope: 'group', scopeId: group.id } });
-    expect(grpRes.status()).toBe(201);
-    const grpSecret = await grpRes.json();
-    expect(grpSecret.scope).toBe('group');
-    cleanupSecretIds.push(grpSecret.id);
-
-    // The group-filtered list returns only the group-scoped secret
-    const listRes = await request.get(`${API_URL}/secrets?scope=group&scopeId=${group.id}`);
-    expect(listRes.status()).toBe(200);
-    const list = await listRes.json();
-    const names = list.map((s: any) => s.name);
-    expect(names).toContain(grpName);
-    expect(names).not.toContain(appName);
-
-    // Update the group-scoped secret value via API
-    const updRes = await request.put(`${API_URL}/secrets/${grpSecret.id}`, { data: { value: 'updated-group-value' } });
-    expect(updRes.status()).toBe(200);
-    const revealRes = await request.post(`${API_URL}/secrets/${grpSecret.id}/reveal`);
-    expect(revealRes.status()).toBe(200);
-    const revealed = await revealRes.json();
-    expect(revealed.value).toBe('updated-group-value');
-
-    // The secrets page shows both secrets with their scope labels
+    // ── Create both secrets via the UI form ──
     await page.goto('/settings/secrets');
+    await page.getByRole('button', { name: 'Add Secret' }).click();
+    await expect(page.getByRole('heading', { name: 'New Secret' })).toBeVisible({ timeout: 5000 });
+    await page.getByLabel('Secret name').fill(appName);
+    await page.getByLabel('Value').fill('app-value');
+    await page.getByRole('button', { name: 'Create', exact: true }).click();
     await expect(page.getByText(appName)).toBeVisible({ timeout: 5000 });
+    cleanupSecretIds.push((await (await request.get(`${API_URL}/secrets?scope=app`)).json()).find((s: any) => s.name === appName)?.id);
+
+    await page.getByRole('button', { name: 'Add Secret' }).click();
+    await expect(page.getByRole('heading', { name: 'New Secret' })).toBeVisible({ timeout: 5000 });
+    const form = page.getByRole('heading', { name: 'New Secret' }).locator('..');
+    await form.getByRole('button', { name: /App-wide/ }).click();
+    await page.getByRole('button', { name: group.name, exact: true }).last().click();
+    await expect(page.getByRole('button', { name: 'CyberArk', exact: true })).toBeVisible({ timeout: 5000 });
+    await page.getByLabel('Secret name').fill(grpName);
+    await page.getByLabel('Value').fill('group-value');
+    await page.getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(page.getByText(grpName)).toBeVisible({ timeout: 5000 });
+    cleanupSecretIds.push((await (await request.get(`${API_URL}/secrets?scope=group&scopeId=${group.id}`)).json()).find((s: any) => s.name === grpName)?.id);
+
+    // ── The page shows both secrets with their scope labels ──
     await expect(page.getByText('app-wide', { exact: true }).first()).toBeVisible();
-    await expect(page.getByText(grpName)).toBeVisible();
     await expect(page.getByText(group.name).first()).toBeVisible();
 
-    // Filter by the group — only the group-scoped secret remains
+    // ── Filter by the group — only the group-scoped secret remains ──
     await page.getByText('All items').first().click();
-    await page.getByText(group.name).first().click();
+    await page.getByText(group.name, { exact: true }).first().click();
     await expect(page.getByText(grpName)).toBeVisible({ timeout: 5000 });
     await expect(page.getByText(appName)).not.toBeVisible({ timeout: 5000 });
 
-    // Delete via API
-    const delRes = await request.delete(`${API_URL}/secrets/${grpSecret.id}`);
-    expect(delRes.status()).toBe(200);
-    const getRes = await request.get(`${API_URL}/secrets/${grpSecret.id}`);
-    expect(getRes.status()).toBe(404);
+    // ── Edit the group-scoped secret value via the UI ──
+    const grpRow = page.locator('div.flex.items-center.justify-between.bg-surface.rounded-lg.border.px-4').filter({ hasText: grpName }).first();
+    await grpRow.getByTestId('edit-secret-btn').click();
+    await expect(page.getByTestId('edit-secret-value')).toBeVisible({ timeout: 5000 });
+    await page.getByTestId('edit-secret-value').fill('updated-group-value');
+    await page.getByTestId('save-secret-value').click();
+    await expect(page.getByTestId('save-secret-value')).toHaveCount(0, { timeout: 5000 });
+
+    // ── Reveal via the UI shows the updated value ──
+    const row2 = page.locator('div.flex.items-center.justify-between.bg-surface.rounded-lg.border.px-4').filter({ hasText: grpName }).first();
+    await row2
+      .locator('button')
+      .filter({ has: page.locator('span.material-symbols-outlined', { hasText: 'visibility' }) })
+      .click();
+    await expect(page.getByText('Reveal secret?')).toBeVisible();
+    await page.getByRole('button', { name: 'Reveal' }).click();
+    await expect(page.getByText(/updated-group-value/)).toBeVisible({ timeout: 5000 });
+
+    // ── Delete via the UI ──
+    const row3 = page.locator('div.flex.items-center.justify-between.bg-surface.rounded-lg.border.px-4').filter({ hasText: grpName }).first();
+    await row3
+      .locator('button')
+      .filter({ has: page.locator('span.material-symbols-outlined', { hasText: 'delete' }) })
+      .click();
+    await expect(page.getByText('Delete secret?')).toBeVisible();
+    await page.getByRole('button', { name: 'Delete' }).click();
+    await expect(page.getByText(grpName)).not.toBeVisible({ timeout: 5000 });
+
+    // Backend reflects the deletion
+    const grpSecret = (await (await request.get(`${API_URL}/secrets?scope=group&scopeId=${group.id}`)).json()).find((s: any) => s.name === grpName);
+    expect(grpSecret).toBeUndefined();
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -716,6 +713,35 @@ test.describe('Secrets management', () => {
     const filtered = await (await request.get(`${API_URL}/secret-vaults?group_id=${group.id}`)).json();
     expect(filtered.length).toBe(1);
     expect(filtered[0].id).toBe(bound.id);
+  });
+
+  test('edit a vault via the UI', async ({ page, request }) => {
+    const gRes = await request.post(`${API_URL}/groups`, { data: { name: `Vault-Edit-Group-${Date.now()}` } });
+    expect(gRes.status()).toBe(201);
+    const group = await gRes.json();
+    cleanupGroupIds.push(group.id);
+
+    const vaultName = `Vault-Edit-Me-${Date.now()}`;
+    const vRes = await request.post(`${API_URL}/secret-vaults`, {
+      data: { name: vaultName, vaultType: 'cyberark', baseUrl: 'http://mock-cyberark-e2e:3005', account: 'conjur', login: 'host/myapp', apiKey: 'myapp-api-key-456', groupId: group.id },
+    });
+    expect(vRes.status()).toBe(201);
+    const vault = await vRes.json();
+    cleanupVaultIds.push(vault.id);
+
+    await page.goto('/settings/secret-vaults');
+    const card = page.locator('div.bg-surface.rounded-lg.border.border-outline-variant.p-4').filter({ hasText: vaultName }).first();
+    await expect(card).toBeVisible({ timeout: 10000 });
+
+    const editedName = `${vaultName}-Renamed`;
+    await card.getByRole('button', { name: 'Edit' }).click();
+    await expect(page.getByRole('heading', { name: 'Edit Vault' })).toBeVisible({ timeout: 5000 });
+    await page.getByLabel('Name').fill(editedName);
+    await page.getByRole('button', { name: 'Update Vault' }).click();
+    await expect(page.getByText(editedName)).toBeVisible({ timeout: 5000 });
+
+    const after = await (await request.get(`${API_URL}/secret-vaults/${vault.id}`)).json();
+    expect(after.name).toBe(editedName);
   });
 
   test('create a vault via the UI and test the connection', async ({ page, request }) => {
