@@ -73,15 +73,43 @@ export function TriggerConfig({ config, onChange, flowId }: TriggerConfigProps) 
 
   useEffect(() => {
     if (triggerType !== 'webhook' || !flowId) return;
+    // Fresh flows live at /flows/new/edit until the server-side draft is
+    // created — a placeholder id ('new') must not be queried. Retry 404s
+    // with backoff so a slow draft creation cannot leave the section stale.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     let cancelled = false;
-    fetch(`${API_URL}/flows/${flowId}/deployment`, { credentials: 'include' })
-      .then(r => r.ok ? r.json() : null)
-      .then((data: any) => {
+    let attempt = 0;
+    const load = async () => {
+      if (!UUID_RE.test(flowId)) {
+        // Placeholder id ('new') — keep polling until the server-side draft
+        // resolves, so the section never shows stale empty values.
+        if (!cancelled && attempt < 10) {
+          attempt += 1;
+          setTimeout(load, 500);
+        }
+        return;
+      }
+      try {
+        const res = await fetch(`${API_URL}/flows/${flowId}/deployment`, { credentials: 'include' });
+        if (!res.ok) {
+          if (!cancelled && attempt < 5) {
+            attempt += 1;
+            setTimeout(load, 500 * attempt);
+          }
+          return;
+        }
+        const data = await res.json();
         if (cancelled || !data) return;
         setDeployment({ pathSlug: data.pathSlug || '', rateLimit: data.rateLimit || 0, summary: data.summary || '' });
         setDeployDraft({ pathSlug: data.pathSlug || '', rateLimit: String(data.rateLimit ?? 0), summary: data.summary || '' });
-      })
-      .catch(() => {});
+      } catch {
+        if (!cancelled && attempt < 5) {
+          attempt += 1;
+          setTimeout(load, 500 * attempt);
+        }
+      }
+    };
+    load();
     return () => { cancelled = true; };
   }, [triggerType, flowId]);
 
