@@ -440,6 +440,12 @@ router.get(
 // inject scripts into the docs page.
 
 router.get('/docs', (_req: any, res: any) => {
+  // Helmet's default CSP (script-src 'self') would block both the pinned
+  // CDN bundle and the inline bootstrap script — allow exactly those.
+  res.setHeader(
+    'Content-Security-Policy',
+    "script-src 'self' https://cdn.jsdelivr.net 'sha256-gBai1X7jWQAZk+eI3aVdStw9EmUZnSRTKiAabBlf4bU='",
+  );
   res.send(`<!DOCTYPE html>
 <html>
 <head>
