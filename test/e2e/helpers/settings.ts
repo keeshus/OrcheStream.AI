@@ -276,6 +276,11 @@ export async function setWebhookDeploymentViaUi(
   await openTriggerConfig(page);
   const section = page.getByTestId('webhook-deployment-settings');
   await expect(section).toBeVisible({ timeout: 5000 });
+  // The deployment GET populates the draft on mount; wait for it so a late
+  // response cannot clobber the values we fill below (server rateLimit is
+  // "0", the empty initial draft is ""). Fresh-flow drafts can take a while
+  // on cold dev-compiled pages, hence the generous timeout.
+  await expect(section.getByTestId('webhook-rate-limit')).not.toHaveValue('', { timeout: 15000 });
   await section.getByTestId('webhook-path-slug').fill(pathSlug);
   await section.getByTestId('webhook-rate-limit').fill(rateLimit);
   await section.getByTestId('webhook-summary').fill(summary);

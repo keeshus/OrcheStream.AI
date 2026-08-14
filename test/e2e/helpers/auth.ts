@@ -1,11 +1,12 @@
 import { readFileSync } from 'fs';
-import { resolve, dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { resolve } from 'path';
+// Must match the playwright config's storageState default (relative to the
+// repo root) so locally the setup spec writes exactly the file the
+// authenticated project and getAdminAuthFile() read. The parallel script
+// overrides PLAYWRIGHT_AUTH_FILE with per-stack files.
 const AUTH_FILE = process.env.PLAYWRIGHT_AUTH_FILE
   ? resolve(process.cwd(), process.env.PLAYWRIGHT_AUTH_FILE)
-  : resolve(__dirname, '../.auth/user.json');
+  : resolve(process.cwd(), 'e2e/.auth/user.json');
 
 /**
  * Path to the saved admin auth state (the user registered by the setup spec).
