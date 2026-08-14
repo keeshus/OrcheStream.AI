@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Icon } from '@/components/ui/Icon';
 import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { api } from '@/lib/api-client';
@@ -33,6 +33,7 @@ export function FlowToolConfig({ config, onChange }: Props) {
 
   const selectedIds: string[] = config?.flowIds || [];
   const selectedFlows: Array<{ id: string; name: string; groupId?: string | null }> = config?.selectedFlows || [];
+  const emptyRetries = useRef(0);
 
   useEffect(() => {
     const load = async () => {
@@ -42,8 +43,20 @@ export function FlowToolConfig({ config, onChange }: Props) {
           api.flows.list({ trigger_type: 'webhook', group_id: filterGroupId || undefined, limit: 100 }),
           canAdmin ? api.groups.list() : Promise.resolve(userGroups),
         ]);
-        setFlows((flowData as any)?.data || flowData || []);
+        const list = (flowData as any)?.data || flowData || [];
+        setFlows(list);
         setGroups(groupData as GroupItem[] || []);
+        // A flow created moments before the modal opened can miss the first
+        // fetch (the list query raced the save in the other editor). The
+        // component stays mounted between opens and never refetches, so
+        // converge with a few backoff retries instead of showing a stale
+        // empty list.
+        if (Array.isArray(list) && list.length === 0 && emptyRetries.current < 3) {
+          emptyRetries.current += 1;
+          setTimeout(load, 1000 * emptyRetries.current);
+          return;
+        }
+        emptyRetries.current = 0;
       } catch { /* ignore */ }
       setLoading(false);
     };

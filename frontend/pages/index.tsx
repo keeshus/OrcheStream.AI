@@ -125,7 +125,9 @@ export default function FlowsListPage() {
     setRunning((prev) => ({ ...prev, [flowId]: 'running' }));
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
+      // First-run executions (cold worker) can take a while to emit the
+      // initial SSE event — give them room before treating the run as failed.
+      const timeout = setTimeout(() => controller.abort(), 15000);
       await api.flows.execute(flowId, input ?? {}, controller.signal);
       clearTimeout(timeout);
       setRunning((prev) => ({ ...prev, [flowId]: 'ok' }));

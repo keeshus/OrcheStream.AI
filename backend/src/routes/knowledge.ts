@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { eq, sql } from 'drizzle-orm';
 import { db } from '../db/connection.js';
-import { documents, embeddings, llmEndpoints } from '../db/schema.js';
+import { documents, embeddings, llmEndpoints, embeddingProviders } from '../db/schema.js';
 import { requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/async-handler.js';
 import { upsertToRegisteredStores } from 'orchestream-ai-shared';
@@ -50,19 +50,35 @@ router.post('/knowledge/upload', requirePermission('knowledge:write'), asyncHand
 
   // Generate embeddings
   let embedFn: (text: string) => Promise<number[]>;
+  const model = embeddingModel || 'text-embedding-ada-002';
+
+  // A configured embedding provider takes precedence — it carries its own
+  // model. LLM endpoints are accepted as a fallback for legacy callers.
   if (embeddingEndpointId) {
-    const [endpoint] = await db.select().from(llmEndpoints).where(eq(llmEndpoints.id, embeddingEndpointId));
-    if (endpoint && (endpoint.provider_type === 'openai' || endpoint.provider_type === 'litellm')) {
+    const [provider] = await db.select().from(embeddingProviders).where(eq(embeddingProviders.id, embeddingEndpointId));
+    if (provider) {
       const OpenAI = (await import('openai')).default;
       const client = new OpenAI({
-        apiKey: endpoint.api_key,
-        baseURL: endpoint.base_url || undefined,
+        apiKey: provider.api_key,
+        baseURL: provider.base_url || undefined,
       });
-      const model = embeddingModel || 'text-embedding-ada-002';
       embedFn = async (text: string) => {
-        const resp = await client.embeddings.create({ model, input: text });
+        const resp = await client.embeddings.create({ model: provider.model, input: text });
         return resp.data[0].embedding;
       };
+    } else {
+      const [endpoint] = await db.select().from(llmEndpoints).where(eq(llmEndpoints.id, embeddingEndpointId));
+      if (endpoint && (endpoint.provider_type === 'openai' || endpoint.provider_type === 'litellm')) {
+        const OpenAI = (await import('openai')).default;
+        const client = new OpenAI({
+          apiKey: endpoint.api_key,
+          baseURL: endpoint.base_url || undefined,
+        });
+        embedFn = async (text: string) => {
+          const resp = await client.embeddings.create({ model, input: text });
+          return resp.data[0].embedding;
+        };
+      }
     }
   }
 

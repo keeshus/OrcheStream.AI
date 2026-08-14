@@ -59,6 +59,10 @@ export function ChatApiSettings({ flowId, isChatFlow }: Props) {
 
   const updateDeployment = async (updates: Partial<ChatApiDeployment>) => {
     setSaving(true);
+    // Optimistic update — the toggle must flip immediately instead of after
+    // the PUT roundtrip. Revert if the server rejects the change.
+    const previous = deployment;
+    setDeployment(prev => ({ ...(prev || { flow_id: flowId, enabled: false, model_name: '', rate_limit: 0 }), ...updates }));
     try {
       const res = await fetch(`/api/flows/${flowId}/chat-api/deployment`, {
         method: 'PUT',
@@ -69,9 +73,11 @@ export function ChatApiSettings({ flowId, isChatFlow }: Props) {
       if (res.ok) {
         const updated = await res.json();
         setDeployment(updated);
+      } else {
+        setDeployment(previous);
       }
     } catch {
-      // Ignore save errors
+      setDeployment(previous);
     }
     setSaving(false);
   };
@@ -124,6 +130,7 @@ export function ChatApiSettings({ flowId, isChatFlow }: Props) {
             type="checkbox"
             checked={deployment?.enabled || false}
             onChange={e => updateDeployment({ enabled: e.target.checked })}
+            disabled={loading || saving}
             className="toggle"
           />
         </label>

@@ -18,6 +18,7 @@ interface TextFieldProps {
   onFocus?: (e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => void;
   onBlur?: (e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => void;
   inputRef?: React.RefObject<HTMLInputElement | HTMLTextAreaElement | null>;
+  'data-testid'?: string;
 }
 
 export function TextField({
@@ -37,6 +38,7 @@ export function TextField({
   onFocus,
   onBlur,
   inputRef,
+  'data-testid': dataTestId,
 }: TextFieldProps) {
   const [focused, setFocused] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
@@ -55,6 +57,7 @@ export function TextField({
         <Tag
           id={label ? inputId : undefined}
           ref={inputRef as any}
+          data-testid={dataTestId}
           type={multiline ? undefined : effectiveType}
           value={value}
           onChange={e => onChange(e.target.value)}

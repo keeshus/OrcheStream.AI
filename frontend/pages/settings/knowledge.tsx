@@ -42,8 +42,7 @@ export default function KnowledgePage() {
             <Link href="/settings" className="flex items-center gap-1 leading-none text-on-surface-variant hover:text-on-surface-variant"><Icon name="arrow_back" className="text-base" /> <span>Back</span></Link>
           </div>
           <Separator.Root orientation="vertical" className="w-px h-6 bg-outline-variant" />
-          <Link href="/settings" className="flex items-center gap-1 leading-none text-on-surface-variant hover:text-on-surface-variant"><Icon name="arrow_back" className="text-base" /> <span>Back</span></Link>
-          <div className="flex-1"><h1 data-testid="knowledge-heading" className="text-2xl font-bold text-on-surface">Knowledge Bases</h1><p className="text-sm text-on-surface-variant mt-1">Embedding providers and vector stores for RAG</p></div>
+          <div className="flex-1"><h1 data-testid="knowledge-heading" className="text-2xl font-bold text-on-surface">Knowledge Bases</h1><p className="text-sm text-on-surface-variant mt-1">Embedding providers and external vector stores for RAG</p></div>
         </div>
 
         {/* Group filter */}

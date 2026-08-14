@@ -27,6 +27,9 @@ export default function SecretsPage() {
   const [reEncrypting, setReEncrypting] = useState(false);
   const [revealedSecrets, setRevealedSecrets] = useState<Record<string, { value: string; expiresAt: number }>>({});
   const [now, setNow] = useState(Date.now());
+  const [editingSecretId, setEditingSecretId] = useState<string | null>(null);
+  const [editingValue, setEditingValue] = useState('');
+  const [editingSaving, setEditingSaving] = useState(false);
 
   const [groups, setGroups] = useState<Array<{ id: string; name: string }>>([]);
   const [selectedGroupId, setSelectedGroupId] = useState('');
@@ -147,8 +150,27 @@ export default function SecretsPage() {
     } catch {}
   };
 
-  const handleRotateKey = async () => {
-    const confirmed = await rotateConfirm.confirm();
+  const handleEditSecret = async (id: string) => {
+    if (!editingValue) { setError('Value is required.'); return; }
+    setEditingSaving(true); setError(null);
+    try {
+      const target = secrets.find(s => s.id === id);
+      const body: Record<string, unknown> = target?.secretType === 'cyberark'
+        ? { referencePath: editingValue }
+        : { value: editingValue };
+      const res = await fetch(`${API_URL}/secrets/${id}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error('Update failed');
+      setEditingSecretId(null);
+      setEditingValue('');
+      await fetchSecrets();
+    } catch (err) { setError(err instanceof Error ? err.message : 'Update failed'); }
+    finally { setEditingSaving(false); }
+  };
+
+  const handleRotateKey = async () => {    const confirmed = await rotateConfirm.confirm();
     if (!confirmed) return;
     setRotating(true); setError(null);
     try {
@@ -302,8 +324,27 @@ export default function SecretsPage() {
                       <span className="text-xs font-mono text-success ml-2">🔓 {revealedSecrets[s.id].value}</span>
                     )}
                   </div>
-                  {!readOnly && (
+                  {editingSecretId === s.id ? (
+                    <div className="flex items-center gap-2 shrink-0 ml-3">
+                      <TextField
+                        label={s.secretType === 'cyberark' ? 'Reference path' : 'Value'}
+                        type={s.secretType === 'cyberark' ? undefined : 'password'}
+                        value={editingValue}
+                        onChange={setEditingValue}
+                        showPasswordToggle
+                        className="w-56"
+                        data-testid="edit-secret-value"
+                      />
+                      <button type="button" onClick={() => { setEditingSecretId(null); setEditingValue(''); }} className="px-3 py-2 text-sm font-medium text-on-surface-variant bg-surface border border-outline rounded-lg hover:bg-surface-container-high transition-colors">Cancel</button>
+                      <button data-testid="save-secret-value" onClick={() => handleEditSecret(s.id)} disabled={editingSaving || !editingValue} className="m3-button disabled:opacity-50 disabled:cursor-not-allowed">{editingSaving ? 'Saving...' : 'Save'}</button>
+                    </div>
+                  ) : !readOnly ? (
                     <div className="flex items-center gap-1 shrink-0 ml-3">
+                      <Tooltip content="Edit value">
+                        <button data-testid="edit-secret-btn" onClick={() => { setEditingSecretId(s.id); setEditingValue(''); }} className="p-1.5 text-on-surface-variant hover:text-primary hover:bg-secondary-container rounded text-xs">
+                          <Icon name="edit" className="text-sm" />
+                        </button>
+                      </Tooltip>
                       <Tooltip content="Reveal value">
                         <button onClick={() => handleReveal(s.id)} className="p-1.5 text-on-surface-variant hover:text-primary hover:bg-secondary-container rounded text-xs">
                           <Icon name="visibility" className="text-sm" />
@@ -312,6 +353,14 @@ export default function SecretsPage() {
                       <Tooltip content="Delete secret">
                         <button onClick={() => handleDelete(s.id)} disabled={deleting === s.id} className="p-1.5 text-on-surface-variant hover:text-error hover:bg-error-container rounded text-xs">
                           <Icon name="delete" className="text-sm" />
+                        </button>
+                      </Tooltip>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1 shrink-0 ml-3">
+                      <Tooltip content="Reveal value">
+                        <button onClick={() => handleReveal(s.id)} className="p-1.5 text-on-surface-variant hover:text-primary hover:bg-secondary-container rounded text-xs">
+                          <Icon name="visibility" className="text-sm" />
                         </button>
                       </Tooltip>
                     </div>

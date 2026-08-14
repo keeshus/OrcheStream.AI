@@ -4,7 +4,7 @@ import { Icon } from '@/components/ui/Icon';
 import { JsonSchemaBuilder } from './JsonSchemaBuilder';
 import { useAuth } from '@/lib/auth-context';
 import { API_URL } from '@/lib/api-client';
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 
 interface TriggerConfigProps {
   config: any;
@@ -63,6 +63,57 @@ export function TriggerConfig({ config, onChange, flowId }: TriggerConfigProps) 
       setLoading(false);
     }
   }, [flowId]);
+
+  // ── Webhook deployment config (path slug / rate limit / summary) ──
+  const [deployment, setDeployment] = useState<{ pathSlug: string; rateLimit: number; summary: string } | null>(null);
+  const [deployDraft, setDeployDraft] = useState<{ pathSlug: string; rateLimit: string; summary: string }>({ pathSlug: '', rateLimit: '', summary: '' });
+  const [deploySaving, setDeploySaving] = useState(false);
+  const [deployError, setDeployError] = useState('');
+  const [deploySaved, setDeploySaved] = useState(false);
+
+  useEffect(() => {
+    if (triggerType !== 'webhook' || !flowId) return;
+    let cancelled = false;
+    fetch(`${API_URL}/flows/${flowId}/deployment`, { credentials: 'include' })
+      .then(r => r.ok ? r.json() : null)
+      .then((data: any) => {
+        if (cancelled || !data) return;
+        setDeployment({ pathSlug: data.pathSlug || '', rateLimit: data.rateLimit || 0, summary: data.summary || '' });
+        setDeployDraft({ pathSlug: data.pathSlug || '', rateLimit: String(data.rateLimit ?? 0), summary: data.summary || '' });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [triggerType, flowId]);
+
+  const handleSaveDeployment = useCallback(async () => {
+    if (!flowId) return;
+    setDeploySaving(true);
+    setDeployError('');
+    setDeploySaved(false);
+    try {
+      const res = await fetch(`${API_URL}/flows/${flowId}/deployment`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pathSlug: deployDraft.pathSlug,
+          rateLimit: parseInt(deployDraft.rateLimit, 10) || 0,
+          summary: deployDraft.summary,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Failed to save deployment' }));
+        throw new Error(err.error || 'Failed to save deployment');
+      }
+      const data = await res.json();
+      setDeployment({ pathSlug: data.pathSlug, rateLimit: data.rateLimit, summary: data.summary });
+      setDeploySaved(true);
+    } catch (err) {
+      setDeployError(err instanceof Error ? err.message : 'Failed to save deployment');
+    } finally {
+      setDeploySaving(false);
+    }
+  }, [flowId, deployDraft]);
 
   if (triggerType === 'subflow') {
     return (
@@ -181,14 +232,49 @@ export function TriggerConfig({ config, onChange, flowId }: TriggerConfigProps) 
             </p>
           </div>
 
+          <div className="bg-surface-container rounded-lg p-3 space-y-3" data-testid="webhook-deployment-settings">
+            <p className="text-xs font-medium text-on-surface-variant">Deployment</p>
+            <TextField
+              label="Path Slug"
+              value={deployDraft.pathSlug}
+              onChange={(v) => { setDeployDraft(p => ({ ...p, pathSlug: v })); setDeploySaved(false); }}
+              helpText="Public URL path: /api/webhook/&lt;slug&gt;. Leave empty to auto-generate from the flow name."
+              data-testid="webhook-path-slug"
+            />
+            <TextField
+              label="Rate Limit (requests/min)"
+              value={deployDraft.rateLimit}
+              onChange={(v) => { setDeployDraft(p => ({ ...p, rateLimit: v.replace(/[^0-9]/g, '') })); setDeploySaved(false); }}
+              helpText="0 = no rate limit."
+              data-testid="webhook-rate-limit"
+            />
+            <TextField
+              label="Summary"
+              value={deployDraft.summary}
+              onChange={(v) => { setDeployDraft(p => ({ ...p, summary: v })); setDeploySaved(false); }}
+              helpText="Shown in the OpenAPI docs for this webhook."
+              data-testid="webhook-summary"
+            />
+            {deployError && <p className="text-xs text-error">{deployError}</p>}
+            {deploySaved && <p className="text-xs text-success" data-testid="webhook-deploy-saved">Deployment saved.</p>}
+            <button
+              onClick={handleSaveDeployment}
+              disabled={deploySaving}
+              data-testid="webhook-save-deployment"
+              className="text-xs px-2 py-1 rounded bg-primary text-on-primary hover:bg-primary/80 disabled:opacity-50"
+            >
+              {deploySaving ? 'Saving...' : 'Save Deployment'}
+            </button>
+          </div>
+
           <div className="bg-surface-container rounded p-2">
             <p className="text-[10px] font-medium text-on-surface-variant mb-1">Webhook URL</p>
             <code className="text-[10px] text-on-surface-variant break-all">
               {baseUrl}/webhook/
-              {pathSlug || flowId}
+              {deployment?.pathSlug || pathSlug || flowId}
               {config.webhookSecret ? '?secret=••••••••' : ''}
             </code>
-            {pathSlug && (
+            {(deployment?.pathSlug || pathSlug) && (
               <p className="text-[10px] text-on-surface-variant mt-1">
                 OpenAPI spec: <a href={`${baseUrl}/openapi.json`} target="_blank" rel="noopener noreferrer" className="text-primary underline">{baseUrl}/openapi.json</a>
                 {' · '}
