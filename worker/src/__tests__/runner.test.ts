@@ -120,6 +120,33 @@ describe('executeFlowWithPersistence', () => {
     );
   });
 
+  it('carries per-run env overrides into the delayed resume job', async () => {
+    mockExecute.mockImplementation(async () => {
+      throw new PauseExecutionError('d1', { x: 1 }, 5000);
+    });
+    const options = makeOptions({ envOverrides: { DB_HOST: 'override-host' } });
+
+    const result = await executeFlowWithPersistence(options);
+
+    expect(result.status).toBe('running');
+    expect(executionQueue.add).toHaveBeenCalledWith(
+      'execute-flow',
+      expect.objectContaining({ envOverrides: { DB_HOST: 'override-host' } }),
+      expect.anything(),
+    );
+  });
+
+  it('strips client-supplied __envOverrides from the engine input (persistence-only field)', async () => {
+    mockExecute.mockResolvedValue({ output: { ok: true } });
+    const options = makeOptions();
+    options.input.__envOverrides = { DB_HOST: 'persisted-only' };
+
+    await executeFlowWithPersistence(options);
+
+    const engineInput = mockExecute.mock.calls[0][1];
+    expect(engineInput).not.toHaveProperty('__envOverrides');
+  });
+
   it('marks the execution failed on engine errors', async () => {
     mockExecute.mockImplementation(async () => {
       throw new Error('boom');

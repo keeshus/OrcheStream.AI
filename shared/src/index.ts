@@ -3,4 +3,5 @@ export * from './db/connection.js';
 export * from './db/schema.js';
 export * from './utils/encryption.js';
 export * from './utils/cyberark.js';
+export * from './utils/env-overrides.js';
 export * from './vector-stores/index.js';

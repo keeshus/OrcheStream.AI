@@ -1,5 +1,5 @@
 import { Queue, Worker as QueueWorker } from 'bullmq';
-import type { FlowDefinition } from 'orchestream-ai-shared';
+import type { FlowDefinition, EnvOverrides } from 'orchestream-ai-shared';
 
 const connection = {
   host: process.env.VALKEY_HOST || 'localhost',
@@ -10,10 +10,18 @@ const connection = {
 
 export const executionQueue = new Queue('flow-executions', { connection });
 
-export async function enqueueExecution(flow: FlowDefinition, input: Record<string, unknown>) {
+export interface ExecutionJobData {
+  flow?: FlowDefinition;
+  input?: Record<string, unknown>;
+  flowId?: string;
+  inputMessage?: Record<string, unknown>;
+  envOverrides?: EnvOverrides;
+}
+
+export async function enqueueExecution(flow: FlowDefinition, input: Record<string, unknown>, envOverrides?: EnvOverrides) {
   return executionQueue.add(
     'execute-flow',
-    { flow, input },
+    { flow, input, envOverrides },
     {
       attempts: 3,
       backoff: { type: 'exponential', delay: 2000 },
@@ -22,7 +30,7 @@ export async function enqueueExecution(flow: FlowDefinition, input: Record<strin
 }
 
 export function createExecutionWorker(
-  handler: (job: { flow?: FlowDefinition; input?: Record<string, unknown>; flowId?: string; inputMessage?: Record<string, unknown> }) => Promise<void>,
+  handler: (job: ExecutionJobData) => Promise<void>,
 ) {
   const worker = new QueueWorker(
     'flow-executions',

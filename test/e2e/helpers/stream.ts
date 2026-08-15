@@ -15,6 +15,7 @@ export async function debugExecute(
   input: Record<string, unknown>,
   cookieHeader?: string,
   abortSignal?: AbortSignal,
+  envOverrides?: Record<string, unknown>,
 ): Promise<SSEEvent[]> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (cookieHeader) headers['Cookie'] = cookieHeader;
@@ -22,7 +23,7 @@ export async function debugExecute(
   const res = await fetch(`${API_URL}/flows/${flowId}/execute`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ input: { _debug: true, ...input }, _debug: true }),
+    body: JSON.stringify({ input: { _debug: true, ...input }, _debug: true, envOverrides }),
     signal: abortSignal,
   });
   if (!res.ok) throw new Error(`Execute failed: ${res.status}`);
@@ -75,6 +76,7 @@ export async function executePersisted(
   flowId: string,
   input: Record<string, unknown>,
   cookieHeader?: string,
+  envOverrides?: Record<string, unknown>,
 ): Promise<{ executionId: string }> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (cookieHeader) headers['Cookie'] = cookieHeader;
@@ -82,7 +84,7 @@ export async function executePersisted(
   const res = await fetch(`${API_URL}/flows/${flowId}/execute`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ input, _debug: false }),
+    body: JSON.stringify({ input, _debug: false, envOverrides }),
   });
   if (!res.ok) throw new Error(`Execute failed: ${res.status}`);
 

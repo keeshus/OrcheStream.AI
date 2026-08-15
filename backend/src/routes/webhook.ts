@@ -5,7 +5,8 @@ import { flows, apiDeployments, executions } from '../db/schema.js';
 import { enqueueExecution } from '../../../worker/src/queue.js';
 import { asyncHandler } from '../utils/async-handler.js';
 import { authenticateWebhookRequest, enforceWebhookRateLimit, enforceWebhookIpRateLimit } from './webhook-security.js';
-import type { NodeData, FlowDefinition } from 'orchestream-ai-shared';
+import type { NodeData, FlowDefinition, EnvOverrides } from 'orchestream-ai-shared';
+import { parseEnvOverrides } from 'orchestream-ai-shared';
 
 const router = Router();
 
@@ -69,12 +70,24 @@ router.post(
       return;
     }
 
+    // Per-run env overrides: extracted before schema validation, validated,
+    // then stripped from the flow input (mirrors webhook-openapi.ts).
+    const rawOverrides = (req.body && typeof req.body === 'object') ? req.body.envOverrides : undefined;
+    const parsedOverrides = parseEnvOverrides(rawOverrides);
+    if (!parsedOverrides.ok) {
+      res.status(400).json({ error: parsedOverrides.error });
+      return;
+    }
+    const envOverrides: EnvOverrides | undefined = Object.keys(parsedOverrides.value).length > 0 ? parsedOverrides.value : undefined;
+    const flowBody = { ...req.body };
+    delete flowBody.envOverrides;
+
     // Validate input schema if defined
     const inputSchema = (triggerNode.data as any).config?.inputSchema;
     if (inputSchema) {
       try {
         const schema = typeof inputSchema === 'string' ? JSON.parse(inputSchema) : inputSchema;
-        const errors = validateInput(req.body, schema);
+        const errors = validateInput(flowBody, schema);
         if (errors.length > 0) {
           res.status(400).json({
             error: 'Input validation failed',
@@ -89,14 +102,18 @@ router.post(
       }
     }
 
-    const input = { ...req.body };
+    const input = { ...flowBody };
     if (req.headers['content-type']?.includes('text/plain')) {
       input.message = (req as any).body || '';
     }
 
-    // Create execution record and enqueue via BullMQ
+    // Create execution record and enqueue via BullMQ. The overrides are
+    // persisted on the record exactly as supplied (never resolved plaintext)
+    // for auditing.
     const [exec] = await db.insert(executions).values({
-      flow_id: flowId, status: 'pending', input, started_at: new Date(),
+      flow_id: flowId, status: 'pending',
+      input: envOverrides ? { ...input, __envOverrides: envOverrides } : input,
+      started_at: new Date(),
     }).returning();
 
     const flowDef: FlowDefinition = {
@@ -106,9 +123,10 @@ router.post(
       createdAt: flow.created_at?.toISOString() || '', updatedAt: flow.updated_at?.toISOString() || '',
       flowContext: flow.flow_context || '',
       groupId: flow.group_id || undefined,
+      envVars: (flow.env_vars as any[]) || [],
     };
 
-    await enqueueExecution(flowDef, { ...input, __executionId: exec.id });
+    await enqueueExecution(flowDef, { ...input, __executionId: exec.id }, envOverrides);
 
     res.json({ status: 'queued', executionId: exec.id });
   }),

@@ -24,7 +24,7 @@ async function main() {
   initVectorStores(db).catch(() => {});
 
   const worker = createExecutionWorker(async (job) => {
-    const { flow, input, flowId } = job;
+    const { flow, input, flowId, envOverrides } = job;
     const executionId = (input as any)?.__executionId as string | undefined;
 
     // Resolve flow definition — either from direct payload or load from DB (repeatable schedule)
@@ -78,6 +78,7 @@ async function main() {
         flow: flowDef,
         input: resolvedInput,
         executionId: execId,
+        envOverrides,
         db,
         executionsTable: executions,
         executionStepsTable: executionSteps,

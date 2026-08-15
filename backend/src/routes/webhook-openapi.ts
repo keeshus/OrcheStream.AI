@@ -5,7 +5,8 @@ import { flows, apiDeployments, executions } from '../db/schema.js';
 import { asyncHandler } from '../utils/async-handler.js';
 import { enqueueExecution } from '../../../worker/src/queue.js';
 import { authenticateWebhookRequest, enforceWebhookRateLimit, enforceWebhookIpRateLimit } from './webhook-security.js';
-import type { FlowDefinition } from 'orchestream-ai-shared';
+import type { FlowDefinition, EnvOverrides } from 'orchestream-ai-shared';
+import { parseEnvOverrides } from 'orchestream-ai-shared';
 
 const router = Router();
 
@@ -87,12 +88,25 @@ router.post(
       return;
     }
 
+    // Per-run env overrides must be extracted BEFORE schema validation so
+    // `additionalProperties: false` input schemas don't reject the reserved
+    // field, and stripped from the flow input afterwards.
+    const rawOverrides = (req.body && typeof req.body === 'object') ? req.body.envOverrides : undefined;
+    const parsedOverrides = parseEnvOverrides(rawOverrides);
+    if (!parsedOverrides.ok) {
+      res.status(400).json({ error: parsedOverrides.error });
+      return;
+    }
+    const envOverrides: EnvOverrides | undefined = Object.keys(parsedOverrides.value).length > 0 ? parsedOverrides.value : undefined;
+    const flowBody = { ...req.body };
+    delete flowBody.envOverrides;
+
     // Validate input schema if defined
     const inputSchema = triggerNode.data?.config?.inputSchema;
     if (inputSchema) {
       try {
         const schema = typeof inputSchema === 'string' ? JSON.parse(inputSchema) : inputSchema;
-        const errors = validateInput(req.body, schema);
+        const errors = validateInput(flowBody, schema);
         if (errors.length > 0) {
           res.status(400).json({ error: 'Input validation failed', details: errors, expectedSchema: schema });
           return;
@@ -102,13 +116,14 @@ router.post(
       }
     }
 
-    const input = { ...req.body };
+    const input = { ...flowBody };
 
-    // Create execution record and enqueue
+    // Create execution record and enqueue. The overrides are persisted on the
+    // record exactly as supplied (never resolved plaintext) for auditing.
     const [exec] = await db.insert(executions).values({
       flow_id: resolved.flowId,
       status: 'pending',
-      input,
+      input: envOverrides ? { ...input, __envOverrides: envOverrides } : input,
       started_at: new Date(),
     }).returning();
 
@@ -119,9 +134,10 @@ router.post(
       createdAt: flow.created_at?.toISOString() || '', updatedAt: flow.updated_at?.toISOString() || '',
       flowContext: flow.flow_context || '',
       groupId: flow.group_id || undefined,
+      envVars: (flow.env_vars as any[]) || [],
     };
 
-    await enqueueExecution(flowDef, { ...input, __executionId: exec.id });
+    await enqueueExecution(flowDef, { ...input, __executionId: exec.id }, envOverrides);
 
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     res.status(202).json({
@@ -285,6 +301,36 @@ router.get(
         ? convertToOpenApiSchema(inputSchema)
         : { type: 'object', properties: {}, additionalProperties: true };
 
+      // Document the reserved envOverrides field alongside the flow's own
+      // input schema. It is accepted on every webhook call regardless of the
+      // configured inputSchema (extracted before schema validation).
+      const requestBodySchema: Record<string, any> = {
+        ...requestSchema,
+        properties: {
+          ...(requestSchema.properties || {}),
+          envOverrides: {
+            type: 'object',
+            description: 'Optional per-run environment variable overrides for this execution only. Keys must match variables configured on the flow; others are ignored. Values are plaintext strings or { type, value } secret references (type: "core_secret" for a core secret name, "cyberark" for a Conjur variable path). Overrides never modify the flow configuration and are resolved only within the flow\'s scope.',
+            additionalProperties: {
+              anyOf: [
+                { type: 'string', description: 'Plaintext value used for this run only' },
+                {
+                  type: 'object',
+                  required: ['type', 'value'],
+                  properties: {
+                    type: { type: 'string', enum: ['core_secret', 'cyberark'] },
+                    value: { type: 'string', description: 'Core secret name or CyberArk variable path' },
+                  },
+                },
+              ],
+            },
+          },
+        },
+        // Without a configured inputSchema the body stays open; with one it
+        // stays closed to the schema's fields plus the reserved envOverrides.
+        additionalProperties: inputSchema ? false : true,
+      };
+
       // POST /api/webhook/{slug}
       paths[`/api/webhook/${slug}`] = {
         post: {
@@ -292,7 +338,7 @@ router.get(
           operationId,
           requestBody: {
             required: true,
-            content: { 'application/json': { schema: requestSchema } },
+            content: { 'application/json': { schema: requestBodySchema } },
           },
           responses: {
             '202': {
@@ -380,7 +426,7 @@ router.get(
         },
       };
 
-      schemas[`${slug}_input`] = requestSchema;
+      schemas[`${slug}_input`] = requestBodySchema;
       schemas[`${slug}_response`] = {
         type: 'object',
         properties: {
@@ -464,7 +510,7 @@ router.get('/docs', (_req: any, res: any) => {
 
 // ── Helpers ─────────────────────────────────────────────────────
 
-function convertToOpenApiSchema(schema: Record<string, string> | string): object {
+function convertToOpenApiSchema(schema: Record<string, string> | string): Record<string, any> {
   const raw = typeof schema === 'string' ? JSON.parse(schema) : schema;
   const properties: Record<string, object> = {};
   const required: string[] = [];

@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Icon } from '@/components/ui/Icon';
+import { EnvOverridesSection, type EnvOverridesPayload } from '@/components/ui/EnvOverridesSection';
 
 interface RunModalProps {
   /** The flow to run; null closes the modal. */
   flow: { id: string; name: string; nodes?: any[] } | null;
   onClose: () => void;
-  onRun: (input: Record<string, unknown>) => void;
+  onRun: (input: Record<string, unknown>, envOverrides?: EnvOverridesPayload) => void;
 }
 
 /**
@@ -16,6 +17,7 @@ interface RunModalProps {
 export function RunModal({ flow, onClose, onRun }: RunModalProps) {
   const [inputText, setInputText] = useState('');
   const [error, setError] = useState('');
+  const [envOverrides, setEnvOverrides] = useState<EnvOverridesPayload | undefined>(undefined);
 
   useEffect(() => {
     if (!flow) return;
@@ -27,6 +29,7 @@ export function RunModal({ flow, onClose, onRun }: RunModalProps) {
     }
     setInputText(JSON.stringify(parsed, null, 2));
     setError('');
+    setEnvOverrides(undefined);
   }, [flow]);
 
   const handleRun = () => {
@@ -42,7 +45,7 @@ export function RunModal({ flow, onClose, onRun }: RunModalProps) {
       return;
     }
     setError('');
-    if (flow) onRun(parsed as Record<string, unknown>);
+    if (flow) onRun(parsed as Record<string, unknown>, envOverrides);
     onClose();
   };
 
@@ -71,6 +74,11 @@ export function RunModal({ flow, onClose, onRun }: RunModalProps) {
           />
           {error && (
             <p className="mt-1 text-xs text-error">{error}</p>
+          )}
+          {flow && (
+            <div className="mt-3">
+              <EnvOverridesSection flowId={flow.id} onChange={setEnvOverrides} />
+            </div>
           )}
           <div className="flex items-center justify-end gap-3 mt-4">
             <Dialog.Close className="m3-button-outlined text-sm">Cancel</Dialog.Close>

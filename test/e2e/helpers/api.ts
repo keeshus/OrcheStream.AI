@@ -18,7 +18,7 @@ export async function registerUser(request: APIRequestContext, user: { name: str
   return res;
 }
 
-export async function createFlow(request: APIRequestContext, flow: { name: string; description?: string; nodes?: any[]; edges?: any[]; group_id?: string | null }) {
+export async function createFlow(request: APIRequestContext, flow: { name: string; description?: string; nodes?: any[]; edges?: any[]; group_id?: string | null; envVars?: any[] }) {
   const res = await request.post(`${API_URL}/flows`, { data: flow });
   return res;
 }

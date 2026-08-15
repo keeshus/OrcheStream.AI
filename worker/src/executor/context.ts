@@ -5,7 +5,7 @@
 // (all persisted runs), so the two can never drift.
 
 import type { ExecutionContext } from './engine.js';
-import type { FlowDefinition } from 'orchestream-ai-shared';
+import type { FlowDefinition, EnvOverrides } from 'orchestream-ai-shared';
 import { decrypt, getSecret as conjurGetSecret, getStore, listStores } from 'orchestream-ai-shared';
 
 export interface ContextBuilderOptions {
@@ -15,6 +15,8 @@ export interface ContextBuilderOptions {
   executionId: string;
   /** Flow-level env vars already resolved to static values (for the sandbox). */
   sandboxEnv: Record<string, string>;
+  /** Per-run overrides for the flow's configured env vars (manual + webhook runs). */
+  envOverrides?: EnvOverrides;
   /** Hooks that differ between the backend and the worker. */
   onSubExecution: (data: { parentExecutionId: string; subflowNodeId: string; subflowId: string; input: Record<string, unknown>; depth: number; path: string }) => Promise<string>;
   completeSubExecution: (subExecutionId: string, output: Record<string, unknown>, status: 'completed' | 'failed', error?: string) => Promise<void>;
@@ -34,7 +36,7 @@ export async function buildExecutionContext(options: ContextBuilderOptions): Pro
 
   // Tables are imported lazily from the shared schema to keep startup cheap.
   const { llmEndpoints, mcpServers, embeddingProviders, vectorStores, flows, groups, agentContexts, agentStore, secrets, secretVaults, groupVaultConfig } = await import('orchestream-ai-shared');
-  const { eq, and, inArray } = await import('drizzle-orm');
+  const { eq, and, inArray, isNull } = await import('drizzle-orm');
 
   const context: ExecutionContext = {
     currentExecutionId: executionId,
@@ -122,8 +124,18 @@ export async function buildExecutionContext(options: ContextBuilderOptions): Pro
 
     getSecret: async (secretName: string, opts?: { scope?: 'app' | 'group' | 'flow' }) => {
       const scope = opts?.scope || 'app';
+      // Scope-aware lookup: group/flow scopes filter by scope_id so a flow can
+      // never resolve another group's or another flow's secret that happens to
+      // share a name. App scope stays app-wide (unchanged behavior).
+      const conditions = [eq(secrets.name, secretName), eq(secrets.scope, scope)];
+      if (scope === 'group') {
+        if (!flowGroupId) return null;
+        conditions.push(eq(secrets.scope_id, flowGroupId));
+      } else if (scope === 'flow') {
+        conditions.push(eq(secrets.scope_id, flow.id));
+      }
       const [secret] = await db.select().from(secrets).where(
-        and(eq(secrets.name, secretName), eq(secrets.scope, scope))
+        and(...conditions)
       ).limit(1);
       if (!secret || !secret.encrypted_value || !secret.encryption_iv || !secret.encryption_tag) return null;
       return decrypt(secret.encrypted_value, secret.encryption_iv, secret.encryption_tag, secret.key_version);
@@ -174,6 +186,57 @@ export async function buildExecutionContext(options: ContextBuilderOptions): Pro
       } else if (entry.type === 'cyberark' && context.getCyberArkSecret) {
         const cyberArkValue = await context.getCyberArkSecret(entry.value);
         if (cyberArkValue) env[entry.name] = cyberArkValue;
+      }
+    }
+
+    // Per-run overrides (manual + webhook) merge on top of the flow's own env:
+    // - allowlist: only names configured on the flow may be overridden
+    // - plaintext → set directly (even over secret-typed flow vars)
+    // - core_secret → resolved within the flow's own scope only
+    //   (flow-scoped → group-scoped → app-wide, filtered by scope_id)
+    // - cyberark → resolved via the flow group's bound vault
+    if (options.envOverrides && Object.keys(options.envOverrides).length > 0) {
+      const flowVarNames = new Set(flow.envVars.map(e => e.name));
+      const decryptRow = async (row: any): Promise<string | null> => {
+        if (!row || !row.encrypted_value || !row.encryption_iv || !row.encryption_tag) return null;
+        return decrypt(row.encrypted_value, row.encryption_iv, row.encryption_tag, row.key_version);
+      };
+      const resolveOverrideSecret = async (secretName: string): Promise<string | null> => {
+        const [flowSecret] = await db.select().from(secrets).where(
+          and(eq(secrets.name, secretName), eq(secrets.scope, 'flow'), eq(secrets.scope_id, flow.id))
+        ).limit(1);
+        const flowValue = await decryptRow(flowSecret);
+        if (flowValue !== null) return flowValue;
+        if (flowGroupId) {
+          const [groupSecret] = await db.select().from(secrets).where(
+            and(eq(secrets.name, secretName), eq(secrets.scope, 'group'), eq(secrets.scope_id, flowGroupId))
+          ).limit(1);
+          const groupValue = await decryptRow(groupSecret);
+          if (groupValue !== null) return groupValue;
+        }
+        const [appSecret] = await db.select().from(secrets).where(
+          and(eq(secrets.name, secretName), eq(secrets.scope, 'app'), isNull(secrets.scope_id))
+        ).limit(1);
+        return decryptRow(appSecret);
+      };
+
+      for (const [name, override] of Object.entries(options.envOverrides)) {
+        if (!flowVarNames.has(name)) continue;
+        if (typeof override === 'string') {
+          env[name] = override;
+        } else if (override.type === 'core_secret') {
+          const secretValue = await resolveOverrideSecret(override.value);
+          if (secretValue) {
+            env[name] = secretValue;
+            context.logSecretAccess?.({ name: override.value, action: 'resolve', source: 'env_override' });
+          }
+        } else if (override.type === 'cyberark') {
+          const cyberArkValue = context.getCyberArkSecret ? await context.getCyberArkSecret(override.value) : null;
+          if (cyberArkValue) {
+            env[name] = cyberArkValue;
+            context.logSecretAccess?.({ name: override.value, action: 'resolve', source: 'env_override_cyberark' });
+          }
+        }
       }
     }
     context.sandboxEnv = env;

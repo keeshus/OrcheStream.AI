@@ -8,7 +8,8 @@ import { buildExecutionContext } from '../../../worker/src/executor/context.js';
 import { requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/async-handler.js';
 import { logger } from '../utils/logger.js';
-import type { SSEEvent, FlowDefinition, ExecutionStep, EnvVarEntry } from 'orchestream-ai-shared';
+import type { SSEEvent, FlowDefinition, ExecutionStep, EnvVarEntry, EnvOverrides } from 'orchestream-ai-shared';
+import { parseEnvOverrides } from 'orchestream-ai-shared';
 import { createSidecarClient, createSandboxManager } from '../../../worker/src/sandbox/index.js';
 
 const router = Router();
@@ -213,7 +214,16 @@ router.post(
   requirePermission('flow:create'),
   asyncHandler(async (req, res) => {
     const flowId = req.params.flowId as string;
-    const { input = {}, nodes: canvasNodes, edges: canvasEdges } = req.body;
+    const { input = {}, nodes: canvasNodes, edges: canvasEdges, envOverrides: rawEnvOverrides } = req.body;
+
+    // Validate per-run env overrides (manual + webhook only) before anything
+    // else — malformed shapes must never reach the queue or the sandbox.
+    const parsedOverrides = parseEnvOverrides(rawEnvOverrides);
+    if (!parsedOverrides.ok) {
+      res.status(400).json({ error: parsedOverrides.error });
+      return;
+    }
+    const envOverrides: EnvOverrides | undefined = Object.keys(parsedOverrides.value).length > 0 ? parsedOverrides.value : undefined;
 
     // Strip client-supplied sandbox env: the execution environment must come
     // exclusively from the flow's own env_vars configuration.
@@ -302,7 +312,10 @@ router.post(
         .values({
           flow_id: flowId,
           status: 'running',
-          input,
+          // Persist exactly what the caller supplied (plaintext values and
+          // secret references — never resolved secret plaintext) so run
+          // history is auditable.
+          input: envOverrides ? { ...input, __envOverrides: envOverrides } : input,
           output: { _flowSnapshot: flowSnapshot } as any,
           started_at: new Date(),
         })
@@ -356,6 +369,7 @@ router.post(
         input: input as Record<string, unknown>,
         executionId: execId,
         sandboxEnv: {},
+        envOverrides,
         onSubExecution: async () => `debug_sub_${Date.now()}`,
         completeSubExecution: async () => {},
         logSecretAccess: (entry) => {
@@ -477,7 +491,7 @@ router.post(
     // The worker executes the flow with the same shared context builder and
     // persists steps/HITL/delays. The SSE stream only confirms the start —
     // the frontend cancels it right after (api.flows.execute).
-    await enqueueExecution(flowDef, { ...(input as Record<string, unknown>), __executionId: execId });
+    await enqueueExecution(flowDef, { ...(input as Record<string, unknown>), __executionId: execId }, envOverrides);
     res.end();
   }),
 );
@@ -747,6 +761,8 @@ router.post('/executions/:executionId/approve', asyncHandler(async (req, res) =>
 
   // Resume via the worker queue — the runner replays from the HITL node with
   // the saved outputs, the decision override, and the accumulated iteration.
+  // The original run's per-run env overrides (persisted on the execution
+  // record) are carried through so the resumed execution sees the same env.
   await executionQueue.add(
     'execute-flow',
     {
@@ -759,6 +775,7 @@ router.post('/executions/:executionId/approve', asyncHandler(async (req, res) =>
         __replayOverride: mergedInput,
         __initialIteration: (exec.output as any)?._nextIteration ?? 1,
       },
+      envOverrides: (exec.input as any)?.__envOverrides || undefined,
     },
     { attempts: 3, backoff: { type: 'exponential', delay: 2000 } },
   );

@@ -2,6 +2,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { Icon } from '@/components/ui/Icon';
 import { SelectField } from '@/components/ui/SelectField';
 import { StepCard } from '@/components/flow/StepCard';
+import { EnvOverridesSection, type EnvOverridesPayload } from '@/components/ui/EnvOverridesSection';
 
 interface DebugOverlayProps {
   flowId: string;
@@ -68,6 +69,7 @@ export function DebugOverlay({ flowId, onClose, nodes: canvasNodes, edges: canva
   const [error, setError] = useState<string | null>(null);
   const [hitlPause, setHitlPause] = useState<{ executionId: string; prompt: string; buttons: { label: string; value: string; icon?: string }[]; nodeId: string; allowFeedback?: boolean } | null>(null);
   const [hitlFeedback, setHitlFeedback] = useState('');
+  const [envOverrides, setEnvOverrides] = useState<EnvOverridesPayload | undefined>(undefined);
   const logEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -182,6 +184,7 @@ export function DebugOverlay({ flowId, onClose, nodes: canvasNodes, edges: canva
       // Always send the latest flow from the editor canvas
       if (canvasNodes) body.nodes = canvasNodes;
       if (canvasEdges) body.edges = canvasEdges;
+      if (envOverrides && Object.keys(envOverrides).length > 0) body.envOverrides = envOverrides;
       const res = await fetch(`${API_URL}/flows/${flowId}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -434,7 +437,7 @@ export function DebugOverlay({ flowId, onClose, nodes: canvasNodes, edges: canva
       setError(err.message || 'Execution error');
       setStatus('failed');
     }
-  }, [flowId, buildInput]);
+  }, [flowId, buildInput, envOverrides]);
 
   const handleHitlApprove = useCallback(async (decision: string) => {
     if (!hitlPause) return;
@@ -694,6 +697,7 @@ className="w-full text-sm border border-outline rounded-lg px-3 py-2 font-mono r
                   )}
                 </div>
               )}
+              <EnvOverridesSection flowId={flowId} onChange={setEnvOverrides} />
               <button
                 data-testid="debug-run-btn"
                 onClick={status === 'running' ? stop : run}

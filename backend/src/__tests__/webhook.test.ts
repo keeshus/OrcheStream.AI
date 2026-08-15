@@ -7,6 +7,23 @@ vi.mock('orchestream-ai-shared', () => ({
   apiDeployments: { _: { name: 'api_deployments' } },
   apiKeys: { _: { name: 'api_keys' } },
   executions: { _: { name: 'executions' } },
+  parseEnvOverrides: (raw: unknown) => {
+    if (raw === undefined || raw === null) return { ok: true, value: {} };
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      return { ok: false, error: 'envOverrides must be a flat object mapping variable names to strings or { type, value } objects' };
+    }
+    const value: Record<string, unknown> = {};
+    for (const [name, val] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof val === 'string') { value[name] = val; continue; }
+      if (val && typeof val === 'object' && !Array.isArray(val)) {
+        const { type, value: v } = val as { type?: unknown; value?: unknown };
+        if ((type === 'core_secret' || type === 'cyberark') && typeof v === 'string') { value[name] = { type, value: v }; continue; }
+        return { ok: false, error: `Invalid envOverride for "${name}": expected { type: 'core_secret' | 'cyberark', value: string }` };
+      }
+      return { ok: false, error: `Invalid envOverride for "${name}": expected a string or { type, value } object` };
+    }
+    return { ok: true, value };
+  },
 }));
 
 vi.mock('drizzle-orm', () => ({
@@ -17,6 +34,8 @@ vi.mock('drizzle-orm', () => ({
 vi.mock('../../../worker/src/queue.js', () => ({
   enqueueExecution: vi.fn(async () => {}),
 }));
+
+import { enqueueExecution } from '../../../worker/src/queue.js';
 
 function getHandler(router: any, method: string, path: string) {
   for (const layer of router.stack) {
@@ -280,6 +299,123 @@ describe('webhook routes (slug resolution)', () => {
       expect(res.status).toHaveBeenCalledWith(429);
       expect(res.json).toHaveBeenCalledWith({ error: 'Rate limit exceeded. Try again later.' });
       expect(res.setHeader).toHaveBeenCalledWith('Retry-After', expect.any(String));
+    });
+
+    it('accepts plaintext envOverrides, persists them on the record and enqueues with them', async () => {
+      const flowId = '550e8400-e29b-41d4-a716-446655440004';
+      req.params = { flowId };
+      req.query = { secret: 'test-secret' };
+      req.body = { amount: 100, envOverrides: { API_KEY: 'sk-123' } };
+
+      const flowChain = mockChain([makeWebhookFlow({ id: flowId, env_vars: [
+        { name: 'API_KEY', type: 'static', value: 'configured-key' },
+        { name: 'DB_PASS', type: 'core_secret', value: 'db-pass' },
+      ], nodes: [{
+        id: 'trigger-1', type: 'trigger',
+        data: { type: 'trigger', config: { triggerType: 'webhook', webhookSecret: 'test-secret' } },
+      }] })]);
+      db.select.mockReturnValueOnce(flowChain).mockReturnValueOnce(mockChain([]));
+      const insertChain = mockChain();
+      insertChain.returning.mockResolvedValue([{ id: 'exec-1' }]);
+      db.insert.mockReturnValue(insertChain);
+
+      await callHandler(getHandler(router, 'post', '/webhook/:flowId'), req, res);
+
+      expect(res.json).toHaveBeenCalledWith({ status: 'queued', executionId: 'exec-1' });
+      // envOverrides stripped from the flow input, persisted as __envOverrides
+      expect(insertChain.values).toHaveBeenCalledWith(expect.objectContaining({
+        flow_id: flowId,
+        input: { amount: 100, __envOverrides: { API_KEY: 'sk-123' } },
+      }));
+      // Enqueued with the overrides and the flowDef now carries env_vars
+      expect(enqueueExecution).toHaveBeenCalledWith(
+        expect.objectContaining({ envVars: [
+          { name: 'API_KEY', type: 'static', value: 'configured-key' },
+          { name: 'DB_PASS', type: 'core_secret', value: 'db-pass' },
+        ] }),
+        { amount: 100, __executionId: 'exec-1' },
+        { API_KEY: 'sk-123' },
+      );
+    });
+
+    it('accepts core_secret and cyberark reference overrides', async () => {
+      const flowId = '550e8400-e29b-41d4-a716-446655440005';
+      req.params = { flowId };
+      req.query = { secret: 'test-secret' };
+      req.body = {
+        amount: 100,
+        envOverrides: {
+          DB_PASS: { type: 'core_secret', value: 'db-pass' },
+          VAULT_TOKEN: { type: 'cyberark', value: 'prod/token' },
+        },
+      };
+
+      const flowChain = mockChain([makeWebhookFlow({ id: flowId, nodes: [{
+        id: 'trigger-1', type: 'trigger',
+        data: { type: 'trigger', config: { triggerType: 'webhook', webhookSecret: 'test-secret' } },
+      }] })]);
+      db.select.mockReturnValueOnce(flowChain).mockReturnValueOnce(mockChain([]));
+      const insertChain = mockChain();
+      insertChain.returning.mockResolvedValue([{ id: 'exec-1' }]);
+      db.insert.mockReturnValue(insertChain);
+
+      await callHandler(getHandler(router, 'post', '/webhook/:flowId'), req, res);
+
+      expect(res.json).toHaveBeenCalledWith({ status: 'queued', executionId: 'exec-1' });
+      expect(enqueueExecution).toHaveBeenCalledWith(
+        expect.anything(),
+        { amount: 100, __executionId: 'exec-1' },
+        {
+          DB_PASS: { type: 'core_secret', value: 'db-pass' },
+          VAULT_TOKEN: { type: 'cyberark', value: 'prod/token' },
+        },
+      );
+    });
+
+    it('rejects invalid envOverrides with 400', async () => {
+      const flowId = '550e8400-e29b-41d4-a716-446655440006';
+      req.params = { flowId };
+      req.query = { secret: 'test-secret' };
+      req.body = { amount: 100, envOverrides: { API_KEY: { type: 'bogus', value: 'x' } } };
+
+      const flowChain = mockChain([makeWebhookFlow({ id: flowId, nodes: [{
+        id: 'trigger-1', type: 'trigger',
+        data: { type: 'trigger', config: { triggerType: 'webhook', webhookSecret: 'test-secret' } },
+      }] })]);
+      db.select.mockReturnValueOnce(flowChain).mockReturnValueOnce(mockChain([]));
+
+      await callHandler(getHandler(router, 'post', '/webhook/:flowId'), req, res);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: expect.stringContaining('Invalid envOverride') }));
+      expect(db.insert).not.toHaveBeenCalled();
+      expect(enqueueExecution).not.toHaveBeenCalled();
+    });
+
+    it('includes flow env vars in the enqueued flowDef (regression: webhook runs previously resolved none)', async () => {
+      const flowId = '550e8400-e29b-41d4-a716-446655440007';
+      req.params = { flowId };
+      req.query = { secret: 'test-secret' };
+      req.body = { amount: 100 };
+
+      const flowChain = mockChain([makeWebhookFlow({ id: flowId, env_vars: [
+        { name: 'GITLAB_TOKEN', type: 'core_secret', value: 'gitlab-token' },
+      ], nodes: [{
+        id: 'trigger-1', type: 'trigger',
+        data: { type: 'trigger', config: { triggerType: 'webhook', webhookSecret: 'test-secret' } },
+      }] })]);
+      db.select.mockReturnValueOnce(flowChain).mockReturnValueOnce(mockChain([]));
+      const insertChain = mockChain();
+      insertChain.returning.mockResolvedValue([{ id: 'exec-1' }]);
+      db.insert.mockReturnValue(insertChain);
+
+      await callHandler(getHandler(router, 'post', '/webhook/:flowId'), req, res);
+
+      expect(enqueueExecution).toHaveBeenCalledWith(
+        expect.objectContaining({ envVars: [{ name: 'GITLAB_TOKEN', type: 'core_secret', value: 'gitlab-token' }] }),
+        expect.anything(),
+        undefined,
+      );
     });
   });
 });

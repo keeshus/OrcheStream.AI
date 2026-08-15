@@ -6,7 +6,7 @@
  */
 import { FlowExecutor, HitlPauseError, FlowStopError, PauseExecutionError } from './engine.js';
 import type { ExecutionContext } from './engine.js';
-import type { FlowDefinition, SSEEvent } from 'orchestream-ai-shared';
+import type { FlowDefinition, SSEEvent, EnvOverrides } from 'orchestream-ai-shared';
 import { createSidecarClient, createSandboxManager } from '../sandbox/index.js';
 import { executionQueue } from '../queue.js';
 import { buildExecutionContext } from './context.js';
@@ -15,6 +15,7 @@ interface RunnerOptions {
   flow: FlowDefinition;
   input: Record<string, unknown>;
   executionId: string;
+  envOverrides?: EnvOverrides;
   db: any;
   executionsTable: any;
   executionStepsTable: any;
@@ -129,6 +130,9 @@ export async function executeFlowWithPersistence(options: RunnerOptions): Promis
   // Client-supplied __env is untrusted — strip it defensively; only the flow's
   // own env vars may reach the sandbox.
   delete (flowInput as any).__env;
+  // __envOverrides is persisted on the execution record for auditing; the
+  // actual merge happens via options.envOverrides in buildExecutionContext.
+  delete (flowInput as any).__envOverrides;
 
   // Initialize sandbox
   const sidecarClient = createSidecarClient();
@@ -150,6 +154,7 @@ export async function executeFlowWithPersistence(options: RunnerOptions): Promis
     input: flowInput,
     executionId,
     sandboxEnv: {},
+    envOverrides: options.envOverrides,
     onSubExecution: async (data) => {
       const [subExec] = await database.insert(executionsTable).values({
         flow_id: data.subflowId,
@@ -274,6 +279,7 @@ export async function executeFlowWithPersistence(options: RunnerOptions): Promis
         {
           flow,
           input: { ...flowInput, __executionId: executionId, __replayFrom: err.nodeId, __replayOutputs: err.savedOutputs },
+          envOverrides: options.envOverrides,
         },
         { delay: err.resumeDelay, attempts: 3, backoff: { type: 'exponential', delay: 2000 } },
       );

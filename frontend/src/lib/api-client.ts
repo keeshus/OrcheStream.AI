@@ -92,12 +92,12 @@ export const api = {
     update: (id: string, data: any) =>
       request<any>(`/flows/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     delete: (id: string) => request<void>(`/flows/${id}`, { method: 'DELETE' }),
-    execute: async (id: string, input?: Record<string, unknown>, signal?: AbortSignal) => {
+    execute: async (id: string, input?: Record<string, unknown>, signal?: AbortSignal, envOverrides?: Record<string, string | { type: string; value: string }>) => {
       const res = await fetch(`${BASE_URL}/flows/${id}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ input }),
+        body: JSON.stringify({ input, envOverrides }),
         signal,
       });
       if (!res.ok) {
@@ -119,8 +119,8 @@ export const api = {
         reader.cancel();
       }
     },
-    executeStream: (id: string, input?: Record<string, unknown>, signal?: AbortSignal) =>
-      streamSSE(`${BASE_URL}/flows/${id}/execute`, { input }, signal),
+    executeStream: (id: string, input?: Record<string, unknown>, signal?: AbortSignal, envOverrides?: Record<string, string | { type: string; value: string }>) =>
+      streamSSE(`${BASE_URL}/flows/${id}/execute`, { input, envOverrides }, signal),
   },
   catalog: {
     list: () => request<any[]>('/catalog'),

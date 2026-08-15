@@ -121,14 +121,14 @@ export default function FlowsListPage() {
     setFlows(flows.filter(f => f.id !== id));
   };
 
-  const handleRun = async (flowId: string, input?: Record<string, unknown>) => {
+  const handleRun = async (flowId: string, input?: Record<string, unknown>, envOverrides?: Record<string, string | { type: string; value: string }>) => {
     setRunning((prev) => ({ ...prev, [flowId]: 'running' }));
     try {
       const controller = new AbortController();
       // First-run executions (cold worker) can take a while to emit the
       // initial SSE event — give them room before treating the run as failed.
       const timeout = setTimeout(() => controller.abort(), 15000);
-      await api.flows.execute(flowId, input ?? {}, controller.signal);
+      await api.flows.execute(flowId, input ?? {}, controller.signal, envOverrides);
       clearTimeout(timeout);
       setRunning((prev) => ({ ...prev, [flowId]: 'ok' }));
     } catch (err: any) {
@@ -735,7 +735,7 @@ export default function FlowsListPage() {
       <RunModal
         flow={runFlow}
         onClose={() => setRunFlow(null)}
-        onRun={(input: Record<string, unknown>) => { if (runFlow) handleRun(runFlow.id, input); }}
+        onRun={(input: Record<string, unknown>, envOverrides?: Record<string, string | { type: string; value: string }>) => { if (runFlow) handleRun(runFlow.id, input, envOverrides); }}
       />
     </div>
   );

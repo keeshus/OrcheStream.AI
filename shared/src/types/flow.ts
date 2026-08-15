@@ -314,6 +314,17 @@ export interface EnvVarConfig {
   envVars: EnvVarEntry[];
 }
 
+// ── Per-run env var overrides (manual + webhook runs) ──────────────
+// Values are either plaintext or references to secrets (core secret name /
+// CyberArk variable path). Resolved server-side; never persisted as plaintext
+// secret values, only as the references the caller supplied.
+
+export type EnvOverrideValue =
+  | string
+  | { type: 'core_secret' | 'cyberark'; value: string };
+
+export type EnvOverrides = Record<string, EnvOverrideValue>;
+
 // ── Execution ────────────────────────────────────────────────
 
 export type ExecutionStatus =
