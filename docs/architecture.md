@@ -284,8 +284,8 @@ flowchart TB
         RF["React Flow canvas<br/>18 custom node types · custom edges<br/>parallel/loop containers · MiniMap"]
     end
     Page <-->|"rAF-debounced callbacks + refs<br/>(addNode/deleteNode/setData)"| Canvas
-    Page -->|"POST /api/flows/:id/execute {input, nodes, edges}"| API["backend"]
-    DEBUG -->|"SSE: step.*, stream.token, subflow.*"| API
+    Page -->|"Run button: POST /execute {input}<br/>persisted → enqueued to worker"| API
+    DEBUG -->|"Debug: POST /execute {input, _debug,<br/>nodes, edges} — runs in-process"| API
     API -->|"SSE events"| DEBUG
 ```
 
@@ -351,7 +351,7 @@ flowchart TB
 | Path | Where it executes | Persistence |
 |---|---|---|
 | **Debug run** (`POST /api/flows/:id/execute`, `_debug: true`) | **In backend process** via `FlowExecutor.execute` with `onEvent` → SSE to the editor overlay; abort on socket close | None (temp id `debug_…`); HITL pauses kept in an in-memory map for resume |
-| **Persisted run** (same endpoint, no `_debug`) | Fire-and-forget `enqueueExecution` → **worker process** via BullMQ | Full: executions + steps rows; SSE closes right after `execution.started` |
+| **Persisted run** (same endpoint, no `_debug`; also webhook + schedule) | Fire-and-forget `enqueueExecution` → **worker process** via BullMQ | Full: executions + steps rows; SSE closes right after `execution.started` |
 | **Chat / OpenAI-compat / Co-Pilot** | **In backend process** (per session) | Chat messages persisted; OpenAI-compat uses a transient session |
 
 ---
@@ -701,21 +701,25 @@ All SSE is **fetch-based** (no EventSource); nginx has buffering disabled for `/
 
 | Consumer | Endpoint | Consumes |
 |---|---|---|
-| DebugOverlay | `POST /api/flows/:id/execute` (debug) | full step/token/subflow stream, HITL pause + inline approve |
-| Editor handleRun | same | `execution.completed/failed` |
-| Dashboard Run button | same | just the first event (confirms start), then cancels — fire-and-forget |
+| DebugOverlay | `POST /api/flows/:id/execute` (`_debug: true`) | full step/token/subflow stream, HITL pause + inline approve — **in-process run** |
+| Editor Run button (`handleRun`) | same (no `_debug`) | only `execution.started`, then the stream closes — **persisted run enqueued to the worker**; result shows in run history |
+| Dashboard Run button | same (no `_debug`) | only the first event (confirms start), then cancels — **persisted run enqueued to the worker** |
 | Chat UI | `POST /api/chat/sessions/:id/messages` | `tool_call`, `tool_result`, `done`, `error` |
 | Co-Pilot | `POST /api/llm/chat` | `token`, `tool_call`, `error` |
 | OpenAI-compatible consumers | `POST /v1/chat/completions` (`stream: true`) | `chat.completion.chunk` frames + `data: [DONE]` |
 
-Persisted runs emit only `execution.started` on the SSE stream (fire-and-forget); history
-is read back from the DB.
+Only debug runs stream to completion over SSE; persisted runs emit only `execution.started`
+(fire-and-forget) and their history is read back from the DB.
 
 ---
 
 ## 14. End-to-End Execution Flows
 
 ### 14.1 Manual run (dashboard / editor)
+
+> **TL;DR:** Manual runs from the dashboard Run button and the editor Run button are
+> **persisted runs enqueued to the worker** (they never carry `_debug`). Only the
+> DebugOverlay sends `_debug: true` and executes in-process in the backend.
 
 ```mermaid
 sequenceDiagram
