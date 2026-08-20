@@ -13,7 +13,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "bullmq": "^6.1.1",
+    "bullmq": "^6.1.2",
     "orchestream-ai-shared": "*",
     "ioredis": "^6.0.0",
     "openai": "^7.4.0",
