@@ -31,7 +31,7 @@
     "neo4j-driver": "^6.2.0"
   },
   "devDependencies": {
-    "@types/pg": "^8.21.0",
+    "@types/pg": "^8.23.1",
     "drizzle-kit": "^0.31.10",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
