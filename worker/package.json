@@ -16,7 +16,7 @@
     "bullmq": "^6.1.2",
     "orchestream-ai-shared": "*",
     "ioredis": "^6.0.0",
-    "openai": "^7.4.0",
+    "openai": "^7.5.0",
     "undici": "^8.10.0"
   },
   "devDependencies": {
